@@ -1,0 +1,35 @@
+[project]
+name = "alignn-reimplementation"
+version = "0.1.0"
+description = "From-scratch ALIGNN reimplementation for crystal property prediction."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "ipykernel>=6.29.5",
+  "jarvis-tools>=2024.10.30",
+  "jupyterlab>=4.2.5",
+  "matplotlib>=3.9.2",
+  "numpy>=1.26.4",
+  "pandas>=2.2.3",
+  "pymatgen>=2024.10.29",
+  "pyyaml>=6.0.2",
+  "scikit-learn>=1.5.2",
+  "seaborn>=0.13.2",
+  "tqdm>=4.66.5",
+]
+
+[project.optional-dependencies]
+train = [
+  "dgl>=2.2.1",
+  "torch>=2.4.1",
+]
+
+[project.scripts]
+alignn-day2 = "alignn.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alignn"]
