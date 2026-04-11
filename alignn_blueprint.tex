@@ -1,0 +1,485 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{booktabs}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    pdftitle={ALIGNN Project Blueprint},
+    pdfauthor={OpenAI Codex}
+}
+
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.5em}
+
+\title{Project Blueprint for a From-Scratch Reimplementation of ALIGNN}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Project Goal}
+The goal of this project is to build a from-scratch reimplementation of the Atomistic Line Graph Neural Network (ALIGNN) for crystal property prediction and to complete a defendable college major project within a strict timeline of 15 days.
+
+The project should prioritize a working, well-explained implementation over full reproduction of every result in the original literature. A realistic and academically strong version of the project is:
+
+\begin{quote}
+Build an ALIGNN-style model for one crystal property prediction task, compare it against a simpler graph baseline, and analyze whether line-graph-based bond-angle information improves predictive performance.
+\end{quote}
+
+\section{Recommended Scope}
+The recommended project scope is:
+
+\begin{itemize}
+    \item One dataset: JARVIS-DFT
+    \item One target property
+    \item Two models:
+    \begin{itemize}
+        \item a baseline graph neural network without line graph
+        \item an ALIGNN model with line graph and angle features
+    \end{itemize}
+    \item One evaluation pipeline using the same split for both models
+    \item One analysis section explaining the effect of bond-angle message passing
+\end{itemize}
+
+This scope is realistic for 15 days and strong enough for a major project report and presentation.
+
+\subsection{Target Selection}
+Only one target is necessary for a 15-day project. In practice, one well-executed target is better than two partially completed ones.
+
+Recommended target choices:
+\begin{itemize}
+    \item \texttt{formation\_energy\_peratom}: safer, easier, and usually more stable
+    \item \texttt{optb88vdw\_bandgap}: more intuitive for presentation, but harder
+\end{itemize}
+
+Recommended final choice:
+\begin{quote}
+Use \texttt{formation\_energy\_peratom} as the main target unless there is a strong advisor preference for band gap.
+\end{quote}
+
+\section{What ALIGNN Is}
+ALIGNN stands for Atomistic Line Graph Neural Network. It extends ordinary graph neural networks by explicitly modeling both pairwise and angular interactions in atomistic systems.
+
+\subsection{Core Idea}
+ALIGNN uses two related graphs:
+\begin{itemize}
+    \item Atomistic graph \(g\): atoms are nodes and nearby atomic pairs are edges
+    \item Line graph \(L(g)\): bonds from the original graph become nodes, and bond-angle relationships become edges
+\end{itemize}
+
+This allows the model to capture:
+\begin{itemize}
+    \item 2-body interactions through bond distances
+    \item 3-body interactions through bond angles
+\end{itemize}
+
+\subsection{Why It Matters}
+Many earlier crystal graph neural networks focused mostly on pairwise distances. ALIGNN explicitly includes angular information, which improves sensitivity to local geometry and coordination environment.
+
+\section{Primary References}
+The following sources are the most important references for the project:
+
+\begin{itemize}
+    \item Original paper: \url{https://www.nature.com/articles/s41524-021-00650-1}
+    \item NIST paper page: \url{https://www.nist.gov/publications/atomistic-line-graph-neural-network-improved-materials-property-predictions}
+    \item Official repository: \url{https://github.com/usnistgov/alignn}
+    \item ALIGNN data collection: \url{https://figshare.com/collections/ALIGNN_data/5429274}
+    \item JARVIS dataset documentation: \url{https://jarvis-tools.readthedocs.io/en/develop/databases.html}
+    \item JARVIS leaderboard: \url{https://pages.nist.gov/jarvis_leaderboard/}
+\end{itemize}
+
+\section{Technical Summary of the Original ALIGNN Setup}
+Important details from the original ALIGNN work include:
+
+\begin{itemize}
+    \item periodic nearest-neighbor crystal graph construction
+    \item radial basis expansion for bond distances
+    \item radial basis expansion for bond-angle features
+    \item 4 ALIGNN layers followed by 4 graph convolution layers in the default configuration
+    \item hidden dimensions around 64 for embedded inputs and 256 for deeper hidden channels in the original setup
+    \item training with AdamW, one-cycle learning rate schedule, and 300 epochs
+\end{itemize}
+
+For a 15-day project, the implementation does not need to match every original hyperparameter exactly. A reduced but faithful configuration is acceptable.
+
+\section{What To Build}
+The minimum set of components that should be built from scratch is:
+
+\begin{enumerate}
+    \item crystal data loader
+    \item periodic atom graph builder
+    \item line graph builder
+    \item atom, bond, and angle feature encoders
+    \item baseline graph neural network
+    \item ALIGNN layer and full ALIGNN model
+    \item training loop
+    \item evaluation pipeline
+    \item result visualization
+    \item report and presentation material
+\end{enumerate}
+
+\section{What Not To Build}
+The following items should be excluded unless the core system is already complete and stable:
+
+\begin{itemize}
+    \item ALIGNN-FF
+    \item phonon or spectral prediction extensions
+    \item multi-task training over many properties
+    \item large-scale leaderboard reproduction
+    \item multi-GPU or distributed training
+    \item exact reproduction of all paper benchmarks
+\end{itemize}
+
+\section{Recommended Project Folder Structure}
+The following structure is practical and clean:
+
+\begin{verbatim}
+alignn_project/
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   └── splits/
+├── notebooks/
+│   ├── 01_data_check.ipynb
+│   ├── 02_graph_debug.ipynb
+│   └── 03_results.ipynb
+├── src/
+│   ├── data/
+│   │   ├── dataset.py
+│   │   ├── graph_builder.py
+│   │   ├── line_graph.py
+│   │   └── features.py
+│   ├── models/
+│   │   ├── baseline_gnn.py
+│   │   ├── edge_gated_conv.py
+│   │   ├── alignn_layer.py
+│   │   └── alignn_model.py
+│   ├── train/
+│   │   ├── trainer.py
+│   │   ├── losses.py
+│   │   └── metrics.py
+│   ├── utils/
+│   │   ├── seed.py
+│   │   ├── config.py
+│   │   └── plotting.py
+│   └── main.py
+├── configs/
+│   ├── baseline.yaml
+│   └── alignn.yaml
+├── results/
+│   ├── checkpoints/
+│   ├── logs/
+│   ├── figures/
+│   └── tables/
+├── report/
+│   ├── outline.md
+│   └── references.md
+├── requirements.txt
+└── README.md
+\end{verbatim}
+
+\section{Recommended Tech Stack}
+Use the following stack unless there is a strong reason to change it:
+
+\begin{itemize}
+    \item Python 3.10 or newer
+    \item PyTorch
+    \item DGL
+    \item NumPy
+    \item Pandas
+    \item scikit-learn
+    \item matplotlib or seaborn
+    \item pymatgen or jarvis-tools for structure parsing
+\end{itemize}
+
+Best practical choice:
+\begin{quote}
+Use PyTorch + DGL for the model implementation, and use pymatgen or jarvis-tools for crystal handling and graph construction support.
+\end{quote}
+
+\section{Core Concepts To Understand}
+\subsection{Atomistic Graph}
+In the atomistic graph:
+\begin{itemize}
+    \item each node represents an atom
+    \item each edge represents a neighboring atomic pair
+\end{itemize}
+
+\subsection{Line Graph}
+In the line graph:
+\begin{itemize}
+    \item each node represents a bond from the original graph
+    \item two line-graph nodes are connected when the corresponding bonds share an atom
+\end{itemize}
+
+This construction allows the model to learn angular relationships.
+
+\subsection{Why ALIGNN Differs From Simpler Crystal GNNs}
+Standard crystal GNNs often focus on distances only. ALIGNN introduces bond-angle-aware message passing by alternating updates on the line graph and the original atom graph.
+
+\section{Minimal Feature Design}
+To keep the reimplementation faithful but feasible, use the following feature design:
+
+\subsection{Atom Features}
+\begin{itemize}
+    \item atomic number embedding
+    \item optional one-hot or learned embedding by element type
+\end{itemize}
+
+\subsection{Bond Features}
+\begin{itemize}
+    \item interatomic distance
+    \item radial basis function expansion of distance
+\end{itemize}
+
+\subsection{Angle Features}
+\begin{itemize}
+    \item bond angle or cosine of bond angle
+    \item radial basis function expansion of angle or cosine
+\end{itemize}
+
+\subsection{Practical Default Dimensions}
+\begin{itemize}
+    \item atom embedding dimension: 64
+    \item bond RBF bins: 80
+    \item angle RBF bins: 40
+    \item hidden dimension: 128 or 256
+\end{itemize}
+
+If compute is limited, use hidden dimension 128 with 2 ALIGNN layers and 2 graph layers.
+
+\section{Architecture Plan}
+\subsection{Baseline Model}
+The baseline model should contain:
+\begin{itemize}
+    \item atom graph only
+    \item atom embeddings
+    \item bond-distance features
+    \item 3 to 4 message-passing layers
+    \item global pooling
+    \item regression head
+\end{itemize}
+
+\subsection{ALIGNN Model}
+The ALIGNN model should contain:
+\begin{itemize}
+    \item atom graph \(g\)
+    \item line graph \(L(g)\)
+    \item shared bond representations
+    \item angle features on line-graph edges
+    \item alternating updates on the line graph and atom graph
+    \item graph-level pooling and regression head
+\end{itemize}
+
+\section{Implementation Order}
+The implementation should follow this order:
+
+\begin{enumerate}
+    \item data loading
+    \item atom graph construction
+    \item line graph construction
+    \item feature encoding
+    \item baseline model
+    \item ALIGNN layer
+    \item full training pipeline
+    \item experiments and comparison
+\end{enumerate}
+
+Do not start with the full model before verifying that graph construction and angle computation are correct.
+
+\section{15-Day Execution Plan}
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.12\textwidth} >{\raggedright\arraybackslash}p{0.38\textwidth} >{\raggedright\arraybackslash}p{0.4\textwidth}}
+\toprule
+Day & Main Tasks & Expected Deliverables \\
+\midrule
+\endfirsthead
+\toprule
+Day & Main Tasks & Expected Deliverables \\
+\midrule
+\endhead
+1 & Read the paper and official repository, freeze scope, choose target property, create repository structure. & Project scope statement, architecture notes, initial folders. \\
+2 & Install dependencies, download dataset or subset, inspect raw data. & Requirements file, data inspection notebook, split plan. \\
+3 & Implement periodic crystal graph builder. & Graph builder module, graph statistics and debug output. \\
+4 & Implement line graph builder and angle computation. & Line graph module, verified angle examples. \\
+5 & Implement feature encoders for atoms, bonds, and angles. & Feature module, tensor shape checks. \\
+6 & Implement baseline GNN and run forward pass. & Baseline model file, one successful batch pass. \\
+7 & Implement baseline training loop and overfit a tiny subset. & Baseline loss curve, checkpoint. \\
+8 & Implement ALIGNN layer and full ALIGNN model. & ALIGNN layer and model files, successful forward pass. \\
+9 & Train ALIGNN on a small real subset and debug issues. & First real ALIGNN training run, validation metrics. \\
+10 & Train baseline and ALIGNN on the same split. & Comparison table with initial results. \\
+11 & Tune essential hyperparameters only. & Final chosen configuration. \\
+12 & Run final experiments and generate figures. & Final plots and result tables. \\
+13 & Write methodology and implementation sections of the report. & Report draft around 60--70\% complete. \\
+14 & Write results, limitations, future work, and make slides. & Near-final report and presentation deck. \\
+15 & Use as buffer for reruns, polishing, README cleanup, and viva practice. & Final submission package. \\
+\bottomrule
+\end{longtable}
+
+\section{Experimental Setup}
+A practical default experimental setup is:
+
+\begin{itemize}
+    \item split: 80/10/10
+    \item loss: mean squared error
+    \item metrics: MAE and RMSE
+    \item optimizer: AdamW
+    \item learning rate: \(10^{-3}\)
+    \item weight decay: \(10^{-5}\)
+    \item quick experiments: 30 to 50 epochs
+    \item final runs: 100 to 200 epochs
+    \item batch size: 16, 32, or 64 depending on hardware
+\end{itemize}
+
+For a 15-day schedule, matching original paper-level performance exactly is not required.
+
+\section{Reduced Configuration for Limited Hardware}
+If the available hardware is limited, use:
+
+\begin{itemize}
+    \item hidden dimension 128
+    \item 2 ALIGNN layers
+    \item 2 graph layers
+    \item 2,000 to 10,000 training samples
+    \item batch size 16
+    \item one target only
+\end{itemize}
+
+This is enough for a solid and defendable project.
+
+\section{Evaluation Plan}
+At minimum, include:
+
+\begin{itemize}
+    \item MAE for the baseline model
+    \item MAE for the ALIGNN model
+    \item RMSE for both
+    \item training time per epoch or total training time
+    \item one scatter plot of predicted versus actual values
+    \item one result table comparing the two models
+\end{itemize}
+
+If time permits, add one ablation:
+\begin{itemize}
+    \item without angle features
+    \item with angle features
+\end{itemize}
+
+\section{Recommended Report Structure}
+The final report can follow this structure:
+
+\begin{enumerate}
+    \item Introduction
+    \item Literature Review
+    \item Methodology
+    \item Implementation Details
+    \item Experimental Setup
+    \item Results and Discussion
+    \item Limitations
+    \item Conclusion and Future Work
+\end{enumerate}
+
+\subsection{Key Storyline}
+The report should answer this central question:
+\begin{quote}
+Does explicit line-graph-based bond-angle message passing improve crystal property prediction relative to a simpler graph baseline?
+\end{quote}
+
+\section{Defensible Simplifications}
+The following simplifications are acceptable if clearly documented:
+
+\begin{itemize}
+    \item using one target instead of many
+    \item using a subset of JARVIS rather than the full benchmark suite
+    \item reducing the number of layers for faster training
+    \item reproducing the architecture conceptually rather than matching every official utility exactly
+\end{itemize}
+
+\section{Main Risks and Mitigations}
+\begin{tabular}{p{0.34\textwidth} p{0.58\textwidth}}
+\toprule
+Risk & Mitigation \\
+\midrule
+Periodic neighbor graph is wrong & Verify neighbor counts and inspect a few structures manually. \\
+Line graph indexing bugs & Test on tiny toy examples before full dataset runs. \\
+Angle computation errors & Compare a few angles against hand calculations. \\
+Model does not train & Overfit 50 to 100 samples before full training. \\
+Running out of time & Finish baseline by Day 7 and ALIGNN by Day 9. \\
+\bottomrule
+\end{tabular}
+
+\section{Expected Final Deliverables}
+The final submission package should contain:
+
+\begin{itemize}
+    \item source code repository
+    \item README with setup and run instructions
+    \item final report PDF
+    \item slide deck
+    \item result plots and tables
+    \item one small demo or inference script
+\end{itemize}
+
+\section{Useful README Contents}
+The README should include:
+
+\begin{itemize}
+    \item project goal
+    \item dataset and target property
+    \item installation steps
+    \item preprocessing instructions
+    \item training commands for baseline and ALIGNN
+    \item evaluation commands
+    \item example results
+\end{itemize}
+
+\section{Likely Viva Questions}
+Prepare concise answers for the following:
+
+\begin{itemize}
+    \item Why use a line graph?
+    \item How is ALIGNN different from CGCNN or a standard crystal GNN?
+    \item What are 2-body and 3-body interactions?
+    \item Why was this target property selected?
+    \item Why was only one target used?
+    \item Why was a subset used instead of the full benchmark?
+    \item What are the limitations of the implementation?
+    \item Why did ALIGNN perform better or worse than the baseline?
+    \item How would the project be extended with more time?
+\end{itemize}
+
+\section{Recommended Project Titles}
+Good title options include:
+
+\begin{itemize}
+    \item From-Scratch Reimplementation of ALIGNN for Crystal Property Prediction
+    \item Recreating the Atomistic Line Graph Neural Network for Materials Property Prediction
+    \item Crystal Property Prediction Using a From-Scratch Atomistic Line Graph Neural Network
+\end{itemize}
+
+\section{Best Immediate Next Steps}
+The project should begin with the following sequence:
+
+\begin{enumerate}
+    \item create the repository structure
+    \item choose \texttt{formation\_energy\_peratom}
+    \item set up PyTorch, DGL, and a structure-processing library
+    \item implement and verify periodic graph construction
+    \item implement and verify line graph and angle generation
+    \item only then start the full model
+\end{enumerate}
+
+\section{Conclusion}
+This blueprint is designed to maximize the chance of a complete, technically sound, and defendable ALIGNN major project within 15 days. The strongest version of the project is not the broadest one. It is the version that correctly implements the core idea, compares it against a baseline, and explains the results clearly.
+
+\end{document}
