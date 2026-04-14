@@ -25,7 +25,7 @@ train = [
 ]
 
 [project.scripts]
-alignn-day2 = "alignn.cli:main"
+alignn = "alignn.cli:main"
 
 [build-system]
 requires = ["hatchling"]
