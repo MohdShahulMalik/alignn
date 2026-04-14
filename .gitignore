@@ -21,3 +21,4 @@ results/tables/*
 !results/logs/.gitkeep
 !results/figures/.gitkeep
 !results/tables/.gitkeep
+.env
