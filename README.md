@@ -49,7 +49,7 @@ If the remote host needs CUDA-specific PyTorch wheels, use the matching PyTorch 
 Download JARVIS-DFT, build an inspection summary, and create the project split:
 
 ```bash
-uv run alignn-day2 prepare \
+uv run alignn prepare \
   --dataset dft_3d \
   --target formation_energy_peratom \
   --max-samples 10000
@@ -58,7 +58,7 @@ uv run alignn-day2 prepare \
 Use the full dataset instead of a capped subset:
 
 ```bash
-uv run alignn-day2 prepare \
+uv run alignn prepare \
   --dataset dft_3d \
   --target formation_energy_peratom
 ```
@@ -75,3 +75,22 @@ The command writes:
 - The default target is `formation_energy_peratom`, matching the blueprint recommendation.
 - The default split is `80/10/10` with a fixed random seed.
 - The split happens after filtering out rows missing the requested target or `atoms`.
+
+## Local Development
+
+This repo also works locally with `uv`, but the local machine should use Python `3.12`, not the Homebrew `3.14` interpreter.
+
+Create or rebuild the local environment with:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv sync --python /usr/bin/python3.12
+```
+
+If you want to run commands directly from the local venv, these work:
+
+```bash
+.venv/bin/alignn --help
+XDG_CACHE_HOME=.cache MPLCONFIGDIR=.cache/matplotlib .venv/bin/python -c "import jarvis.core.atoms, pymatgen.core"
+```
+
+VS Code settings are included so the workspace should pick `${workspaceFolder}/.venv/bin/python` automatically.

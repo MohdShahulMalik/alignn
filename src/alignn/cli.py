@@ -8,7 +8,7 @@ from alignn.data.jarvis import prepare_dataset
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="alignn-day2",
+        prog="alignn",
         description="Day 2 data preparation for the ALIGNN reimplementation project.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
