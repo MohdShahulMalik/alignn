@@ -1,0 +1,38 @@
+{
+  "dataset": "dft_3d",
+  "target": "formation_energy_peratom",
+  "rows_after_filter": 10000,
+  "used_max_samples": 10000,
+  "target_describe": {
+    "count": 10000.0,
+    "mean": -0.806011939,
+    "std": 1.0822176095007425,
+    "min": -4.37158,
+    "25%": -1.5417125,
+    "50%": -0.54189,
+    "75%": -0.09126999999999999,
+    "max": 5.28329
+  },
+  "num_atoms_describe": {
+    "count": 10000.0,
+    "mean": 10.3026,
+    "std": 8.871386779435278,
+    "min": 1.0,
+    "25%": 4.0,
+    "50%": 7.0,
+    "75%": 14.0,
+    "max": 86.0
+  },
+  "example_jids": [
+    "JVASP-120052",
+    "JVASP-133855",
+    "JVASP-128001",
+    "JVASP-121627",
+    "JVASP-107353",
+    "JVASP-140883",
+    "JVASP-115700",
+    "JVASP-151617",
+    "JVASP-145175",
+    "JVASP-97402"
+  ]
+}

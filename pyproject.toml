@@ -20,8 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-  "dgl>=2.2.1",
-  "torch>=2.4.1",
+  "dgl==2.1.0",
+  "numpy<2",
+  "pydantic>=2,<3",
+  "torch==2.2.1",
+  "torchdata==0.7.1",
 ]
 
 [project.scripts]

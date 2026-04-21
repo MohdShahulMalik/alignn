@@ -21,4 +21,6 @@ results/tables/*
 !results/logs/.gitkeep
 !results/figures/.gitkeep
 !results/tables/.gitkeep
+!results/logs/baseline_tiny_overfit_history.csv
+!results/tables/dft_3d_formation_energy_peratom_inspection.json
 .env
