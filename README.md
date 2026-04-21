@@ -8,9 +8,9 @@ Current scope:
 - target: `formation_energy_peratom`
 - comparison: baseline graph model vs ALIGNN
 
-## Day 2 Deliverables
+## Day 2-7 Deliverables
 
-Day 2 focuses on environment setup, dataset download or subset preparation, raw data inspection, and split planning.
+Days 2-5 cover data preparation, graph construction, line graph generation, and feature encoding. Days 6-7 add the baseline graph model plus a tiny-subset training loop that can be used as an overfit check.
 
 Implemented here:
 
@@ -18,6 +18,9 @@ Implemented here:
 - dataset preparation CLI in [src/alignn/cli.py](/home/maxum/projects/personal/python/alignn/src/alignn/cli.py)
 - JARVIS download and inspection helpers in [src/alignn/data/jarvis.py](/home/maxum/projects/personal/python/alignn/src/alignn/data/jarvis.py)
 - deterministic split generator in [src/alignn/data/splits.py](/home/maxum/projects/personal/python/alignn/src/alignn/data/splits.py)
+- graph dataset loader in [src/alignn/data/dataset.py](/home/maxum/projects/personal/python/alignn/src/alignn/data/dataset.py)
+- baseline GNN in [src/alignn/models/baseline_gnn.py](/home/maxum/projects/personal/python/alignn/src/alignn/models/baseline_gnn.py)
+- baseline trainer in [src/alignn/train/trainer.py](/home/maxum/projects/personal/python/alignn/src/alignn/train/trainer.py)
 - starter inspection notebook in [notebooks/01_data_check.ipynb](/home/maxum/projects/personal/python/alignn/notebooks/01_data_check.ipynb)
 - split plan in [report/split_plan.md](/home/maxum/projects/personal/python/alignn/report/split_plan.md)
 
@@ -44,7 +47,7 @@ uv sync --extra train
 
 If the remote host needs CUDA-specific PyTorch wheels, use the matching PyTorch index URL instead of the default wheel source. Keep that step on the GPU machine only.
 
-## Day 2 Commands
+## Commands
 
 Download JARVIS-DFT, build an inspection summary, and create the project split:
 
@@ -69,6 +72,36 @@ The command writes:
 - a CSV summary to `data/processed`
 - split CSV files to `data/splits`
 - an inspection JSON report to `results/tables`
+
+Run the day 6 baseline forward pass:
+
+```bash
+uv run --extra train alignn baseline-forward \
+  --dataset dft_3d \
+  --target formation_energy_peratom \
+  --batch-size 4
+```
+
+Run the day 7 tiny-subset overfit check:
+
+```bash
+# Option 1: Using the launch wrapper (recommended for GPU)
+./scripts/run_train.sh
+
+# Option 2: Direct CLI
+uv run --extra train alignn baseline-overfit \
+  --dataset dft_3d \
+  --target formation_energy_peratom \
+  --subset-size 16 \
+  --epochs 50
+```
+
+> **Note**: The `scripts/run_train.sh` wrapper sets `LD_LIBRARY_PATH` to include CUDA libraries from the venv, which is required for DGL's Graphbolt loader to find `libnvrtc.so` on GPU hosts.
+
+The overfit command writes:
+
+- a checkpoint to `results/checkpoints/baseline_tiny_overfit.pt`
+- per-epoch loss history to `results/logs/baseline_tiny_overfit_history.csv`
 
 ## Notes
 
