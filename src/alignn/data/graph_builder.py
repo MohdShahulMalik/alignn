@@ -27,7 +27,7 @@ def _neighbor_image(neighbor) -> tuple[int, int, int]:
         a, b, c = image
         return int(a), int(b), int(c)
     index = getattr(neighbor, "index", None)
-    if index is not None and len(index) == 3:
+    if isinstance(index, (tuple, list)) and len(index) == 3:
         a, b, c = index
         return int(a), int(b), int(c)
 
@@ -71,7 +71,7 @@ def _collect_atom_neighbors(
     if len(neighbors) <= max_neighbors:
         return neighbors
 
-    kth_distance = neighbors[max_neighbors - 1]
+    kth_distance = neighbors[max_neighbors - 1].distance
     kept_neighbors = [
         edge for edge in neighbors if edge.distance <= kth_distance + tolerance
     ]
