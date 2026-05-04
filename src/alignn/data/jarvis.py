@@ -108,3 +108,39 @@ def prepare_dataset(
         f"{len(split_frames['val'])} val / "
         f"{len(split_frames['test'])} test."
     )
+
+
+def import_splits_from_ids_json(
+    project_root: Path,
+    ids_json: Path,
+    dataset_name: str,
+    target_column: str,
+) -> None:
+    project_root = project_root.resolve()
+    paths = _ensure_dirs(project_root)
+    records = _load_records(dataset_name=dataset_name, raw_dir=paths["raw"])
+    frame = _build_dataframe(records=records, target_column=target_column)
+    by_jid = frame.set_index("jid", drop=False)
+
+    split_ids = json.loads(ids_json.read_text(encoding="utf-8"))
+    key_map = {"train": "id_train", "val": "id_val", "test": "id_test"}
+    counts: dict[str, int] = {}
+    for split_name, json_key in key_map.items():
+        ids = [str(jid) for jid in split_ids[json_key]]
+        missing = [jid for jid in ids if jid not in by_jid.index]
+        if missing:
+            raise KeyError(
+                f"{len(missing)} {split_name} IDs are missing from {dataset_name}: "
+                + ", ".join(missing[:10])
+            )
+        split_frame = by_jid.loc[ids, ["jid", target_column, "target", "num_atoms"]]
+        split_frame.to_csv(
+            paths["splits"] / f"{dataset_name}_{target_column}_{split_name}.csv",
+            index=False,
+        )
+        counts[split_name] = len(split_frame)
+
+    print(
+        f"Imported exact splits for {dataset_name}/{target_column}: "
+        f"{counts['train']} train / {counts['val']} val / {counts['test']} test."
+    )
