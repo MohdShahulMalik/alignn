@@ -89,12 +89,68 @@ def get_k_nearest_edges(
     Get the k-nearest neighbors for each atom in the structure.
     """
     all_neighbors = []
+    per_atom_neighbors = []
     for atom_index in range(len(structure)):
         neighbors = _collect_atom_neighbors(
             structure, cutoff, atom_index, max_neighbors, tolerance
         )
+        per_atom_neighbors.append(neighbors)
         all_neighbors.extend(neighbors)
-    return all_neighbors
+
+    if per_atom_neighbors and min(len(n) for n in per_atom_neighbors) < max_neighbors:
+        lattice_lengths = structure.lattice.abc
+        expanded_cutoff = max(max(lattice_lengths), 2 * cutoff)
+        if expanded_cutoff > cutoff + tolerance:
+            return get_k_nearest_edges(
+                structure=structure,
+                cutoff=expanded_cutoff,
+                max_neighbors=max_neighbors,
+                tolerance=tolerance,
+            )
+
+    return _canonical_undirected_edges(structure, all_neighbors)
+
+
+def _canonical_edge_key(edge: NeighborEdge) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    src = edge.src
+    dst = edge.dst
+    src_image = (0, 0, 0)
+    dst_image = tuple(edge.image)
+
+    if dst < src:
+        src, dst = dst, src
+        src_image, dst_image = dst_image, src_image
+
+    if src_image != (0, 0, 0):
+        shift = src_image
+        src_image = tuple(np.subtract(src_image, shift).astype(int))
+        dst_image = tuple(np.subtract(dst_image, shift).astype(int))
+
+    return (src, dst), dst_image
+
+
+def _canonical_undirected_edges(
+    structure: Structure,
+    directed_edges: list[NeighborEdge],
+) -> list[NeighborEdge]:
+    edge_images: dict[tuple[int, int], set[tuple[int, int, int]]] = {}
+    for edge in directed_edges:
+        pair, image = _canonical_edge_key(edge)
+        edge_images.setdefault(pair, set()).add(image)
+
+    canonical_edges: list[NeighborEdge] = []
+    frac_coords = np.asarray(structure.frac_coords, dtype=float)
+    lattice = structure.lattice
+    for (src, dst), images in edge_images.items():
+        for image in images:
+            dst_frac = frac_coords[dst] + np.asarray(image, dtype=float)
+            r = np.asarray(lattice.get_cartesian_coords(dst_frac - frac_coords[src]))
+            distance = float(np.linalg.norm(r))
+            canonical_edges.append(NeighborEdge(src, dst, distance, r, image))
+            canonical_edges.append(
+                NeighborEdge(dst, src, distance, -r, tuple(-np.asarray(image, dtype=int)))
+            )
+    return canonical_edges
 
 
 def build_atom_graph(

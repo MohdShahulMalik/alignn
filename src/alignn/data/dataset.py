@@ -69,7 +69,7 @@ class JarvisGraphDataset(Dataset[GraphTargetSample]):
         self.compute_line_graph = compute_line_graph
         self.cache_graphs = cache_graphs
 
-        split_path = (
+        split_path: Path = (
             self.project_root
             / "data"
             / "splits"
