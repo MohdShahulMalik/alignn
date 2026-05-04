@@ -35,6 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project root containing data/, results/, and notebooks/ directories.",
     )
 
+    import_splits = subparsers.add_parser(
+        "import-splits",
+        help="Create split CSVs from an ids_train_val_test.json file.",
+    )
+    import_splits.add_argument("--ids-json", type=Path, required=True)
+    import_splits.add_argument("--dataset", default="dft_3d")
+    import_splits.add_argument("--target", default="formation_energy_peratom")
+    import_splits.add_argument("--project-root", type=Path, default=Path.cwd())
+
     baseline_forward = subparsers.add_parser(
         "baseline-forward",
         help="Run a baseline GNN forward pass on one prepared batch.",
@@ -76,6 +85,48 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path.cwd(),
     )
+
+    alignn_forward = subparsers.add_parser(
+        "alignn-forward",
+        help="Run an ALIGNN forward pass on one prepared batch.",
+    )
+    alignn_forward.add_argument("--dataset", default="dft_3d")
+    alignn_forward.add_argument("--target", default="formation_energy_peratom")
+    alignn_forward.add_argument("--split", default="train")
+    alignn_forward.add_argument("--batch-size", type=int, default=4)
+    alignn_forward.add_argument("--hidden-dim", type=int, default=64)
+    alignn_forward.add_argument("--alignn-layers", type=int, default=4)
+    alignn_forward.add_argument("--gcn-layers", type=int, default=4)
+    alignn_forward.add_argument("--cutoff", type=float, default=8.0)
+    alignn_forward.add_argument("--max-neighbors", type=int, default=12)
+    alignn_forward.add_argument("--device", default=None)
+    alignn_forward.add_argument("--project-root", type=Path, default=Path.cwd())
+
+    alignn_train = subparsers.add_parser(
+        "alignn-train-small",
+        help="Train ALIGNN on a small real subset and report validation metrics.",
+    )
+    alignn_train.add_argument("--dataset", default="dft_3d")
+    alignn_train.add_argument("--target", default="formation_energy_peratom")
+    alignn_train.add_argument("--train-split", default="train")
+    alignn_train.add_argument("--val-split", default="val")
+    alignn_train.add_argument("--test-split", default="test")
+    alignn_train.add_argument("--train-subset-size", type=int, default=64)
+    alignn_train.add_argument("--val-subset-size", type=int, default=16)
+    alignn_train.add_argument("--test-subset-size", type=int, default=16)
+    alignn_train.add_argument("--batch-size", type=int, default=4)
+    alignn_train.add_argument("--hidden-dim", type=int, default=64)
+    alignn_train.add_argument("--alignn-layers", type=int, default=4)
+    alignn_train.add_argument("--gcn-layers", type=int, default=4)
+    alignn_train.add_argument("--cutoff", type=float, default=8.0)
+    alignn_train.add_argument("--max-neighbors", type=int, default=12)
+    alignn_train.add_argument("--epochs", type=int, default=10)
+    alignn_train.add_argument("--learning-rate", type=float, default=1e-3)
+    alignn_train.add_argument("--weight-decay", type=float, default=1e-5)
+    alignn_train.add_argument("--loss", choices=["l1", "mse", "smoothl1"], default="l1")
+    alignn_train.add_argument("--scheduler", choices=["onecycle", "none"], default="onecycle")
+    alignn_train.add_argument("--device", default=None)
+    alignn_train.add_argument("--project-root", type=Path, default=Path.cwd())
     return parser
 
 
@@ -92,6 +143,15 @@ def main() -> None:
             target_column=args.target,
             max_samples=args.max_samples,
             seed=args.seed,
+        )
+    elif args.command == "import-splits":
+        from alignn.data.jarvis import import_splits_from_ids_json
+
+        import_splits_from_ids_json(
+            project_root=args.project_root,
+            ids_json=args.ids_json,
+            dataset_name=args.dataset,
+            target_column=args.target,
         )
     elif args.command == "baseline-forward":
         from alignn.train.trainer import run_baseline_forward_pass
@@ -120,6 +180,48 @@ def main() -> None:
             batch_size=args.batch_size,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
+            cutoff=args.cutoff,
+            max_neighbors=args.max_neighbors,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            loss_name=args.loss,
+            scheduler_name=args.scheduler,
+            device=args.device,
+        )
+    elif args.command == "alignn-forward":
+        from alignn.train.trainer import run_alignn_forward_pass
+
+        run_alignn_forward_pass(
+            project_root=args.project_root,
+            dataset_name=args.dataset,
+            target_column=args.target,
+            split=args.split,
+            batch_size=args.batch_size,
+            hidden_dim=args.hidden_dim,
+            alignn_layers=args.alignn_layers,
+            gcn_layers=args.gcn_layers,
+            cutoff=args.cutoff,
+            max_neighbors=args.max_neighbors,
+            device=args.device,
+        )
+    elif args.command == "alignn-train-small":
+        from alignn.train.trainer import train_alignn_small_subset
+
+        train_alignn_small_subset(
+            project_root=args.project_root,
+            dataset_name=args.dataset,
+            target_column=args.target,
+            train_split=args.train_split,
+            val_split=args.val_split,
+            test_split=args.test_split,
+            train_subset_size=args.train_subset_size,
+            val_subset_size=args.val_subset_size,
+            test_subset_size=args.test_subset_size,
+            batch_size=args.batch_size,
+            hidden_dim=args.hidden_dim,
+            alignn_layers=args.alignn_layers,
+            gcn_layers=args.gcn_layers,
             cutoff=args.cutoff,
             max_neighbors=args.max_neighbors,
             epochs=args.epochs,
