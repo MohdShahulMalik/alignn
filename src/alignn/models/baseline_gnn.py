@@ -4,37 +4,23 @@ import dgl
 import dgl.function as fn
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from alignn.data.features import CrystalFeatureEncoder
 
 
 class EdgeGatedGraphConv(nn.Module):
-    """Minimal edge-gated message passing for the day 6 baseline."""
+    """Original ALIGNN-style normalized edge-gated graph convolution."""
 
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
-        self.src_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.edge_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.edge_gate = nn.Linear(hidden_dim * 3, hidden_dim)
-        self.node_update = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.edge_update = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.node_norm = nn.LayerNorm(hidden_dim)
-        self.edge_norm = nn.LayerNorm(hidden_dim)
-
-    def _edge_messages(self, edges: dgl.udf.EdgeBatch) -> dict[str, torch.Tensor]:
-        edge_input = torch.cat([edges.src["h"], edges.dst["h"], edges.data["e"]], dim=-1)
-        gate = torch.sigmoid(self.edge_gate(edge_input))
-        msg = gate * (self.src_proj(edges.src["h"]) + self.edge_proj(edges.data["e"]))
-        edge_update = self.edge_update(edge_input)
-        return {"m": msg, "e_update": edge_update}
+        self.src_gate = nn.Linear(hidden_dim, hidden_dim)
+        self.dst_gate = nn.Linear(hidden_dim, hidden_dim)
+        self.edge_gate = nn.Linear(hidden_dim, hidden_dim)
+        self.src_update = nn.Linear(hidden_dim, hidden_dim)
+        self.dst_update = nn.Linear(hidden_dim, hidden_dim)
+        self.node_norm = nn.BatchNorm1d(hidden_dim)
+        self.edge_norm = nn.BatchNorm1d(hidden_dim)
 
     def forward(
         self,
@@ -43,14 +29,23 @@ class EdgeGatedGraphConv(nn.Module):
         edge_feats: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with g.local_scope():
-            g.ndata["h"] = node_feats
-            g.edata["e"] = edge_feats
-            g.apply_edges(self._edge_messages)
-            g.update_all(fn.copy_e("m", "m"), fn.sum("m", "agg"))
+            g.ndata["e_src"] = self.src_gate(node_feats)
+            g.ndata["e_dst"] = self.dst_gate(node_feats)
+            g.apply_edges(fn.u_add_v("e_src", "e_dst", "e_nodes"))
+            edge_update = g.edata.pop("e_nodes") + self.edge_gate(edge_feats)
 
-            node_input = torch.cat([node_feats, g.ndata["agg"]], dim=-1)
-            node_out = self.node_norm(node_feats + self.node_update(node_input))
-            edge_out = self.edge_norm(edge_feats + g.edata["e_update"])
+            g.edata["sigma"] = torch.sigmoid(edge_update)
+            g.ndata["dst_update"] = self.dst_update(node_feats)
+            g.update_all(
+                fn.u_mul_e("dst_update", "sigma", "m"),
+                fn.sum("m", "sum_sigma_h"),
+            )
+            g.update_all(fn.copy_e("sigma", "m"), fn.sum("m", "sum_sigma"))
+            aggregate = g.ndata["sum_sigma_h"] / (g.ndata["sum_sigma"] + 1e-6)
+
+            node_delta = self.src_update(node_feats) + aggregate
+            node_out = node_feats + F.silu(self.node_norm(node_delta))
+            edge_out = edge_feats + F.silu(self.edge_norm(edge_update))
 
         return node_out, edge_out
 
