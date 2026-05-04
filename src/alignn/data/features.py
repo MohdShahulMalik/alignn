@@ -7,6 +7,20 @@ import torch.nn as nn
 from typing import Optional
 import numpy as np
 import dgl
+from jarvis.core.specie import chem_data, get_node_attributes
+
+
+def _build_atom_feature_lookup(atom_features: str) -> torch.Tensor:
+    max_z = max(value["Z"] for value in chem_data.values())
+    template = get_node_attributes("C", atom_features)
+    features = np.zeros((max_z + 1, len(template)), dtype=np.float32)
+
+    for element, value in chem_data.items():
+        attrs = get_node_attributes(element, atom_features)
+        if attrs is not None:
+            features[value["Z"], :] = np.asarray(attrs, dtype=np.float32)
+
+    return torch.tensor(features, dtype=torch.float32)
 
 
 class AtomEmbedding(nn.Module):
@@ -118,9 +132,15 @@ class AtomFeatureEncoder(nn.Module):
         num_elements: int = 100,
         atom_features: int = 92,
         hidden_dim: int = 64,
+        feature_set: str = "cgcnn",
     ):
         super().__init__()
         self.atom_embedding = nn.Linear(atom_features, hidden_dim)
+        self.register_buffer(
+            "feature_lookup",
+            _build_atom_feature_lookup(feature_set),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -129,8 +149,8 @@ class AtomFeatureEncoder(nn.Module):
     ) -> torch.Tensor:
         if element_features is not None:
             return self.atom_embedding(element_features)
-        z = atomic_numbers.clamp(min=0, max=99)
-        return self.atom_embedding(z.unsqueeze(-1).float().expand(-1, 92))
+        z = atomic_numbers.clamp(min=0, max=self.feature_lookup.shape[0] - 1)
+        return self.atom_embedding(self.feature_lookup[z])
 
 
 class BondEncoder(nn.Module):
