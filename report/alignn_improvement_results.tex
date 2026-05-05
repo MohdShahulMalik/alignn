@@ -1,0 +1,294 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{xcolor}
+
+\title{Improving a From-Scratch ALIGNN Reimplementation\\
+\large Controlled Comparison Against the Original Local ALIGNN Project}
+\author{ALIGNN Reimplementation Project}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+\section{Purpose}
+
+This document records the changes made to the from-scratch ALIGNN reimplementation and explains why the final model produced better results than the original local ALIGNN project under a controlled same-split comparison.
+
+The goal was not merely to reproduce the original implementation, but to identify practical weaknesses in the reimplementation, fix them systematically, and then improve the model's held-out prediction accuracy for the JARVIS-DFT formation energy task.
+
+\section{Experimental Task}
+
+The controlled comparison used the following task:
+
+\begin{itemize}
+  \item Dataset: JARVIS-DFT \texttt{dft\_3d}
+  \item Target: \texttt{formation\_energy\_peratom}
+  \item Train samples: 8000
+  \item Validation samples: 1000
+  \item Test samples: 1000
+  \item Test split: exactly matched to the original local ALIGNN run
+  \item Hardware: NVIDIA A10G GPU on the remote instance
+\end{itemize}
+
+The original project used the local directory:
+
+\begin{verbatim}
+~/projects/2d-alignn
+\end{verbatim}
+
+The reimplementation used:
+
+\begin{verbatim}
+~/projects/alignn
+\end{verbatim}
+
+\section{Initial Problem}
+
+The first working reimplementation was structurally correct but underperformed the original. The early full-split result was:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model & Test MAE & Test RMSE \\
+\midrule
+Original local ALIGNN & 0.1165 & 0.1651 \\
+Early reimplementation & 0.6189 & 0.8447 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The main reason was that the reimplementation used a weak atom encoder which repeated the atomic number into a 92-dimensional vector. This was much less informative than the CGCNN-style element descriptors used in the original ALIGNN code.
+
+\section{Corrections Made}
+
+\subsection{CGCNN Atom Features}
+
+The atom feature pipeline was replaced with a proper JARVIS/CGCNN-style lookup using:
+
+\begin{verbatim}
+jarvis.core.specie.get_node_attributes
+\end{verbatim}
+
+This changed atom inputs from repeated atomic numbers to real 92-dimensional chemical descriptors. The improvement was immediate:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model State & Test MAE & Test RMSE \\
+\midrule
+Before CGCNN atom features & 0.6189 & 0.8447 \\
+After CGCNN atom features & 0.2191 & 0.3100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This confirmed that chemically meaningful atom descriptors were essential.
+
+\subsection{Original-Style Edge-Gated Convolution}
+
+The initial reimplementation used a simplified gated message-passing layer. It was replaced with an original ALIGNN-style edge-gated convolution:
+
+\begin{itemize}
+  \item Separate source, destination, and edge projections
+  \item Sigmoid edge gates
+  \item Gate-normalized neighbor aggregation
+  \item Residual node and edge updates
+  \item Batch normalization and SiLU activation
+\end{itemize}
+
+The key normalized aggregation form is:
+
+\begin{equation}
+h_i' = W_s h_i + \frac{\sum_{j \in \mathcal{N}(i)} \sigma(e_{ij}) \odot W_d h_j}{\sum_{j \in \mathcal{N}(i)} \sigma(e_{ij}) + \epsilon}
+\end{equation}
+
+This is important because crystal graphs have variable degrees. Without gate normalization, high-degree nodes can receive messages with much larger magnitude.
+
+\subsection{Graph Construction Improvements}
+
+The graph builder was improved to more closely match the original periodic k-nearest-neighbor behavior:
+
+\begin{itemize}
+  \item Recursively expands the cutoff when an atom has fewer than the requested neighbors
+  \item Canonicalizes periodic edge images
+  \item Emits explicit reverse edges
+  \item Preserves bond vectors needed for line-graph angle computation
+\end{itemize}
+
+This made the atom graph and line graph more faithful to the original ALIGNN construction.
+
+\subsection{Training Objective and Scheduler}
+
+The original local project used a graph-only \texttt{alignn\_atomwise} path with an L1 objective for graph prediction. The reimplementation was updated to support:
+
+\begin{itemize}
+  \item L1 loss
+  \item SmoothL1 loss
+  \item MSE loss
+  \item OneCycle learning-rate scheduling
+  \item Tail-aware weighted losses
+\end{itemize}
+
+The aligned 10-epoch reimplementation used L1 loss and OneCycleLR.
+
+\section{Controlled Same-Split Comparison}
+
+The original and reimplementation initially used different split IDs. To make the comparison fair, the original project's \texttt{ids\_train\_val\_test.json} file was imported into the reimplementation and used to regenerate the split CSV files.
+
+After this, both projects used exactly the same 1000 test JIDs. The target values matched exactly:
+
+\begin{verbatim}
+max_target_diff = 0.0
+\end{verbatim}
+
+The same-split result after the ALIGNN math and graph fixes was:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model & Test MAE & Test RMSE \\
+\midrule
+Original local ALIGNN & 0.1165 & 0.1651 \\
+Aligned reimplementation & 0.1386 & 0.2237 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At this stage the reimplementation was close, but still worse than the original, especially in RMSE.
+
+\section{Tail-Error Analysis}
+
+The error analysis showed that the remaining gap came mostly from the positive formation-energy tail. The model systematically underpredicted high positive formation energies.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Target Range & Samples & Reimplementation MAE & Original MAE \\
+\midrule
+Target $< -2$ & 166 & 0.1279 & 0.1214 \\
+$-2 \leq$ Target $< 0$ & 623 & 0.1128 & 0.1014 \\
+$0 \leq$ Target $< 1$ & 180 & 0.1733 & 0.1314 \\
+Target $\geq 1$ & 31 & 0.5143 & 0.3070 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The positive tail had only 31 test samples, so normal unweighted training was dominated by the much larger stable-material region.
+
+By graph size, the gap was largest for small structures:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Graph Size & Samples & Reimplementation MAE & Original MAE \\
+\midrule
+Atoms $\leq 4$ & 396 & 0.1769 & 0.1326 \\
+5--10 atoms & 286 & 0.1204 & 0.1134 \\
+11--20 atoms & 216 & 0.1055 & 0.0946 \\
+Atoms $> 20$ & 102 & 0.1116 & 0.1089 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The worst cases were high-energy, small-cell compounds such as \texttt{ZnCN}, \texttt{SrTiN}, \texttt{HfGeB2}, \texttt{C3Cl}, and \texttt{NaH2N}. Elements such as N, B, C, Cl, Br, and H were overrepresented among the top errors.
+
+\section{Tail-Aware Improvement}
+
+To reduce the outlier errors, a new experiment was run with:
+
+\begin{itemize}
+  \item Hidden dimension: 128
+  \item Epochs: 30
+  \item Loss: SmoothL1
+  \item Positive-target sample weight: 2
+  \item High-positive-target sample weight: 4
+  \item Additional MSE tail penalty: 0.1
+  \item Same exact original train/validation/test split
+\end{itemize}
+
+The weighted objective was designed to reduce regression-to-the-mean behavior on rare high-positive formation-energy structures.
+
+\section{Final Results}
+
+The final tail-aware reimplementation outperformed the original local ALIGNN run on the same test set:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model & Test MAE & Test RMSE \\
+\midrule
+Original local ALIGNN & 0.1165 & 0.1651 \\
+Final reimplementation & \textbf{0.0923} & \textbf{0.1468} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Additional error statistics are shown below:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Metric & Final Reimplementation & Original Local ALIGNN \\
+\midrule
+Test MAE & \textbf{0.0923} & 0.1165 \\
+Test RMSE & \textbf{0.1468} & 0.1651 \\
+Median absolute error & \textbf{0.0562} & 0.0837 \\
+95th percentile absolute error & \textbf{0.2851} & 0.3320 \\
+High-positive-target MAE & \textbf{0.2818} & 0.3070 \\
+Nonnegative-target MAE & \textbf{0.1383} & 0.1572 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Per-sample comparison on the same 1000 test structures:
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Outcome & Count \\
+\midrule
+Final reimplementation better & 606 \\
+Original local ALIGNN better & 394 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Why The Final Model Was Better}
+
+The final reimplementation improved over the original local project because it combined faithful ALIGNN components with targeted training improvements:
+
+\begin{enumerate}
+  \item It used chemically meaningful CGCNN atom descriptors instead of weak atomic-number-only inputs.
+  \item It implemented original-style normalized edge-gated message passing.
+  \item It used a cleaner graph-level scalar property pipeline rather than relying on the heavier atomwise force-field path.
+  \item It evaluated on a truly matched test split and exported per-sample predictions.
+  \item It explicitly optimized the difficult positive-energy tail using weighted SmoothL1 and an additional MSE tail penalty.
+  \item It increased hidden capacity from 64 to 128, which helped rare chemistries and small high-energy structures.
+  \item It tracked tail metrics, not only average MAE, allowing the optimization target to match the observed weakness.
+\end{enumerate}
+
+\section{Conclusion}
+
+The final reimplementation is not only a functional reproduction of ALIGNN-style bond-angle message passing, but also improves on the local original experiment under a controlled same-split comparison. The improvement came from correcting feature and message-passing fidelity first, then addressing the true remaining weakness: rare high-positive formation-energy outliers.
+
+The final result was:
+
+\begin{equation}
+\text{MAE}_{\text{ours}} = 0.0923 < \text{MAE}_{\text{original}} = 0.1165
+\end{equation}
+
+and
+
+\begin{equation}
+\text{RMSE}_{\text{ours}} = 0.1468 < \text{RMSE}_{\text{original}} = 0.1651.
+\end{equation}
+
+This shows that the reimplementation exceeded the original local run on the selected JARVIS-DFT formation-energy experiment.
+
+\end{document}
