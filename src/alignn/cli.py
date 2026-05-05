@@ -125,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--weight-decay", type=float, default=1e-5)
     alignn_train.add_argument("--loss", choices=["l1", "mse", "smoothl1"], default="l1")
     alignn_train.add_argument("--scheduler", choices=["onecycle", "none"], default="onecycle")
+    alignn_train.add_argument("--positive-weight", type=float, default=1.0)
+    alignn_train.add_argument("--high-positive-weight", type=float, default=1.0)
+    alignn_train.add_argument("--mse-tail-weight", type=float, default=0.0)
     alignn_train.add_argument("--device", default=None)
     alignn_train.add_argument("--project-root", type=Path, default=Path.cwd())
     return parser
@@ -187,6 +190,9 @@ def main() -> None:
             weight_decay=args.weight_decay,
             loss_name=args.loss,
             scheduler_name=args.scheduler,
+            positive_weight=args.positive_weight,
+            high_positive_weight=args.high_positive_weight,
+            mse_tail_weight=args.mse_tail_weight,
             device=args.device,
         )
     elif args.command == "alignn-forward":

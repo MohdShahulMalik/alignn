@@ -67,10 +67,71 @@ def _regression_metrics(
     targets: torch.Tensor,
 ) -> dict[str, float]:
     errors = predictions - targets
-    return {
+    abs_errors = torch.abs(errors)
+    metrics = {
         "mae": float(torch.mean(torch.abs(errors)).item()),
         "rmse": float(torch.sqrt(torch.mean(errors**2)).item()),
     }
+    for name, mask in {
+        "nonnegative": targets >= 0,
+        "high_positive": targets >= 1,
+    }.items():
+        if bool(mask.any()):
+            subset_errors = errors[mask]
+            metrics[f"{name}_mae"] = float(torch.mean(torch.abs(subset_errors)).item())
+            metrics[f"{name}_rmse"] = float(
+                torch.sqrt(torch.mean(subset_errors**2)).item()
+            )
+        else:
+            metrics[f"{name}_mae"] = float("nan")
+            metrics[f"{name}_rmse"] = float("nan")
+    metrics["p95_abs_error"] = float(torch.quantile(abs_errors, 0.95).item())
+    metrics["max_abs_error"] = float(torch.max(abs_errors).item())
+    return metrics
+
+
+def _sample_weights(
+    targets: torch.Tensor,
+    positive_weight: float,
+    high_positive_weight: float,
+) -> torch.Tensor:
+    weights = torch.ones_like(targets)
+    weights = torch.where(targets > 0, torch.full_like(weights, positive_weight), weights)
+    weights = torch.where(
+        targets > 1,
+        torch.full_like(weights, high_positive_weight),
+        weights,
+    )
+    return weights
+
+
+def _weighted_regression_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    loss_name: str,
+    positive_weight: float,
+    high_positive_weight: float,
+    mse_tail_weight: float,
+) -> torch.Tensor:
+    if loss_name == "mse":
+        per_sample = (predictions - targets) ** 2
+    elif loss_name == "smoothl1":
+        per_sample = torch.nn.functional.smooth_l1_loss(
+            predictions,
+            targets,
+            reduction="none",
+        )
+    elif loss_name == "l1":
+        per_sample = torch.abs(predictions - targets)
+    else:
+        raise ValueError(f"Unsupported loss: {loss_name}")
+
+    weights = _sample_weights(targets, positive_weight, high_positive_weight)
+    loss = torch.mean(per_sample * weights)
+    if mse_tail_weight > 0:
+        tail_mse = (predictions - targets) ** 2
+        loss = loss + mse_tail_weight * torch.mean(tail_mse * weights)
+    return loss
 
 
 def _subset_or_full(dataset: JarvisGraphDataset, size: int) -> Subset | JarvisGraphDataset:
@@ -353,6 +414,9 @@ def train_alignn_small_subset(
     weight_decay: float = 1e-5,
     loss_name: str = "l1",
     scheduler_name: str = "onecycle",
+    positive_weight: float = 1.0,
+    high_positive_weight: float = 1.0,
+    mse_tail_weight: float = 0.0,
     device: str | None = None,
 ) -> None:
     project_root = project_root.resolve()
@@ -413,13 +477,7 @@ def train_alignn_small_subset(
         gcn_layers=gcn_layers,
     ).to(run_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    if loss_name == "mse":
-        criterion = nn.MSELoss()
-    elif loss_name == "smoothl1":
-        criterion = nn.SmoothL1Loss()
-    elif loss_name == "l1":
-        criterion = nn.L1Loss()
-    else:
+    if loss_name not in {"mse", "smoothl1", "l1"}:
         raise ValueError(f"Unsupported loss: {loss_name}")
     scheduler = None
     if scheduler_name == "onecycle":
@@ -451,7 +509,14 @@ def train_alignn_small_subset(
             targets = targets.to(run_device)
 
             predictions = model(graph_batch, line_graph_batch)
-            loss = criterion(predictions, targets)
+            loss = _weighted_regression_loss(
+                predictions=predictions,
+                targets=targets,
+                loss_name=loss_name,
+                positive_weight=positive_weight,
+                high_positive_weight=high_positive_weight,
+                mse_tail_weight=mse_tail_weight,
+            )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -477,6 +542,10 @@ def train_alignn_small_subset(
                 "train_rmse": train_metrics["rmse"],
                 "val_mae": val_metrics["mae"],
                 "val_rmse": val_metrics["rmse"],
+                "val_nonnegative_mae": val_metrics["nonnegative_mae"],
+                "val_high_positive_mae": val_metrics["high_positive_mae"],
+                "val_p95_abs_error": val_metrics["p95_abs_error"],
+                "val_max_abs_error": val_metrics["max_abs_error"],
             }
         )
 
@@ -490,7 +559,9 @@ def train_alignn_small_subset(
         print(
             f"epoch={epoch:03d} loss={mean_loss:.6f} "
             f"train_mae={train_metrics['mae']:.6f} val_mae={val_metrics['mae']:.6f} "
-            f"val_rmse={val_metrics['rmse']:.6f}"
+            f"val_rmse={val_metrics['rmse']:.6f} "
+            f"val_high_pos_mae={val_metrics['high_positive_mae']:.6f} "
+            f"val_p95={val_metrics['p95_abs_error']:.6f}"
         )
 
     checkpoints_dir = project_root / "results" / "checkpoints"
@@ -523,6 +594,13 @@ def train_alignn_small_subset(
             "gcn_layers": gcn_layers,
             "loss": loss_name,
             "scheduler": scheduler_name,
+            "positive_weight": positive_weight,
+            "high_positive_weight": high_positive_weight,
+            "mse_tail_weight": mse_tail_weight,
+            "test_nonnegative_mae": test_metrics["nonnegative_mae"],
+            "test_high_positive_mae": test_metrics["high_positive_mae"],
+            "test_p95_abs_error": test_metrics["p95_abs_error"],
+            "test_max_abs_error": test_metrics["max_abs_error"],
         },
         checkpoint_path,
     )
@@ -531,7 +609,18 @@ def train_alignn_small_subset(
     with history_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["epoch", "loss", "train_mae", "train_rmse", "val_mae", "val_rmse"],
+            fieldnames=[
+                "epoch",
+                "loss",
+                "train_mae",
+                "train_rmse",
+                "val_mae",
+                "val_rmse",
+                "val_nonnegative_mae",
+                "val_high_positive_mae",
+                "val_p95_abs_error",
+                "val_max_abs_error",
+            ],
         )
         writer.writeheader()
         writer.writerows(history)
@@ -550,6 +639,8 @@ def train_alignn_small_subset(
         f"best_val_mae={best_val_mae:.6f}, "
         f"test_mae={test_metrics['mae']:.6f}, "
         f"test_rmse={test_metrics['rmse']:.6f}, "
+        f"test_high_pos_mae={test_metrics['high_positive_mae']:.6f}, "
+        f"test_p95={test_metrics['p95_abs_error']:.6f}, "
         f"checkpoint={checkpoint_path}, "
         f"history={history_path}, "
         f"predictions={predictions_path}."
