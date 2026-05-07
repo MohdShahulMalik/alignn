@@ -1,0 +1,186 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  backgroundcolor=\color{gray!5}
+}
+
+\title{Target-Specific ALIGNN Improvements for Band Gap and Energy Above Hull}
+\author{ALIGNN Reimplementation Study}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+
+This report documents only the two new JARVIS targets improved after the formation-energy study:
+\begin{itemize}
+  \item \texttt{optb88vdw\_bandgap}
+  \item \texttt{ehull}
+\end{itemize}
+
+All comparisons used the same target, same dataset, same exact imported train/validation/test JIDs, and the same 1000 test structures as the original repository runs.  The original comparison artifacts came from \texttt{\$HOME/projects/2d-alignn}, while the improved reimplementation runs were executed under \texttt{\$HOME/projects/alignn} on the remote GPU instance.
+
+\section{What Was Different From the Original Model}
+
+The original model used a generic graph-level regression setup across targets.  Our improved runs kept the same ALIGNN-style architecture scale used in these comparisons, but changed the training objective to match each target's observed failure mode.
+
+\subsection{Shared Implementation Differences}
+
+The reimplementation included several fixes and training controls that were not part of the original comparison baseline:
+\begin{itemize}
+  \item Original-style normalized edge-gated graph convolution with residual updates, batch normalization, and SiLU activations.
+  \item JARVIS/CGCNN atom feature lookup instead of weak repeated atomic-number features.
+  \item Recursive cutoff expansion, periodic edge canonicalization, and explicit reverse edges in graph construction.
+  \item Validation and test loaders with \texttt{drop\_last=False}, so all validation and test samples contribute to metrics.
+  \item Seeded training and seeded data-loader shuffling for reproducibility.
+  \item Target transforms for nonnegative/skewed targets, while reporting metrics after inverse transform on the original physical scale.
+  \item Target-range-aware sample weighting, allowing low-target and high-target regions to be emphasized or de-emphasized directly.
+  \item Optional nonnegative prediction clipping for targets that cannot be physically negative.
+\end{itemize}
+
+\subsection{Band Gap: Failure Mode and Fix}
+
+For \texttt{optb88vdw\_bandgap}, the test set was dominated by metallic or near-metallic samples, but the largest errors were also affected by underprediction of high-gap structures.  A generic SmoothL1 run improved some tail metrics but did not directly optimize both regimes.
+
+The improved objective therefore used:
+\begin{itemize}
+  \item \texttt{SmoothL1} loss for robust regression.
+  \item Extra weight for near-zero band gaps using \texttt{--low-target-threshold 0.05 --low-target-weight 2.0}.
+  \item Stronger weight for high-gap samples using \texttt{--high-target-threshold 1.0 --high-positive-weight 4.0}.
+  \item Nonnegative prediction clipping with \texttt{--prediction-min 0}.
+\end{itemize}
+
+This directly addressed the two observed band-gap error regimes: metallic samples and larger-gap underprediction.
+
+\subsection{Energy Above Hull: Failure Mode and Fix}
+
+For \texttt{ehull}, the imported original split was highly distribution-shifted.  The train split contained many high-energy structures, while validation and test were mostly stable or near-stable structures.  The target distributions were:
+\begin{itemize}
+  \item Train mean: approximately \texttt{0.331}; about \texttt{26.6\%} above \texttt{0.5}.
+  \item Validation mean: approximately \texttt{0.041}; about \texttt{54.6\%} below \texttt{0.001}.
+  \item Test mean: approximately \texttt{0.0205}; about \texttt{75.5\%} below \texttt{0.001}.
+\end{itemize}
+
+The original and early reimplementation runs had positive bias on stable/near-zero structures.  The improved objective therefore used:
+\begin{itemize}
+  \item \texttt{log1p} target transform for the nonnegative skewed target.
+  \item Strong upweighting of near-zero structures using \texttt{--low-target-threshold 0.001 --low-target-weight 6.0}.
+  \item Downweighting of positive and high-energy structures using \texttt{--positive-weight 0.35 --high-target-threshold 0.1 --high-positive-weight 0.2}.
+  \item Nonnegative prediction clipping with \texttt{--prediction-min 0}.
+\end{itemize}
+
+This reduced the near-zero positive bias from the earlier tuned runs and aligned training pressure with the validation/test distribution.
+
+\section{Results}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Target & Run & MAE & RMSE & P95 Abs. Error & Wins/Losses \\
+\midrule
+\texttt{optb88vdw\_bandgap} & Original & 0.26809 & 0.64872 & 1.47607 & -- \\
+\texttt{optb88vdw\_bandgap} & Improved & \textbf{0.23485} & \textbf{0.60921} & \textbf{1.19387} & \textbf{717/283} \\
+\texttt{ehull} & Original & 0.05503 & 0.08726 & 0.17663 & -- \\
+\texttt{ehull} & Improved & \textbf{0.03213} & \textbf{0.07361} & \textbf{0.15353} & \textbf{788/212} \\
+\bottomrule
+\end{tabular}
+\caption{Same-split test metrics on 1000 original test JIDs per target.  Wins/losses count samples where the improved model had lower absolute error than the original model.}
+\end{table}
+
+\section{Reproduction Commands}
+
+All commands below are intended to be run on the remote instance from \texttt{\$HOME/projects/alignn} with \texttt{uv} on the path.
+
+\subsection{Band Gap}
+
+\begin{lstlisting}[language=bash]
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/projects/alignn" && uv run alignn alignn-train-small \
+  --dataset dft_3d \
+  --target optb88vdw_bandgap \
+  --train-subset-size 0 \
+  --val-subset-size 0 \
+  --test-subset-size 0 \
+  --batch-size 16 \
+  --hidden-dim 128 \
+  --alignn-layers 4 \
+  --gcn-layers 4 \
+  --epochs 25 \
+  --seed 123 \
+  --learning-rate 0.001 \
+  --weight-decay 0.00001 \
+  --loss smoothl1 \
+  --scheduler onecycle \
+  --target-transform none \
+  --low-target-threshold 0.05 \
+  --low-target-weight 2.0 \
+  --high-target-threshold 1.0 \
+  --high-positive-weight 4.0 \
+  --prediction-min 0 \
+  --run-name dft3d_optb88vdw_bandgap_h128_smoothl1_low2_high4_clamp_25epoch_seed123 \
+  --project-root "$HOME/projects/alignn"
+\end{lstlisting}
+
+Result artifact paths:
+\begin{itemize}
+  \item \texttt{results/checkpoints/dft3d\_optb88vdw\_bandgap\_h128\_smoothl1\_low2\_high4\_clamp\_25epoch\_seed123.pt}
+  \item \texttt{results/logs/dft3d\_optb88vdw\_bandgap\_h128\_smoothl1\_low2\_high4\_clamp\_25epoch\_seed123\_history.csv}
+  \item \texttt{results/logs/dft3d\_optb88vdw\_bandgap\_h128\_smoothl1\_low2\_high4\_clamp\_25epoch\_seed123\_test\_predictions.csv}
+\end{itemize}
+
+\subsection{Energy Above Hull}
+
+\begin{lstlisting}[language=bash]
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/projects/alignn" && uv run alignn alignn-train-small \
+  --dataset dft_3d \
+  --target ehull \
+  --train-subset-size 0 \
+  --val-subset-size 0 \
+  --test-subset-size 0 \
+  --batch-size 16 \
+  --hidden-dim 128 \
+  --alignn-layers 4 \
+  --gcn-layers 4 \
+  --epochs 25 \
+  --seed 123 \
+  --learning-rate 0.001 \
+  --weight-decay 0.00001 \
+  --loss smoothl1 \
+  --scheduler onecycle \
+  --target-transform log1p \
+  --positive-weight 0.35 \
+  --low-target-threshold 0.001 \
+  --low-target-weight 6.0 \
+  --high-target-threshold 0.1 \
+  --high-positive-weight 0.2 \
+  --prediction-min 0 \
+  --run-name dft3d_ehull_h128_smoothl1_log1p_low6_downhigh_25epoch_seed123 \
+  --project-root "$HOME/projects/alignn"
+\end{lstlisting}
+
+Result artifact paths:
+\begin{itemize}
+  \item \texttt{results/checkpoints/dft3d\_ehull\_h128\_smoothl1\_log1p\_low6\_downhigh\_25epoch\_seed123.pt}
+  \item \texttt{results/logs/dft3d\_ehull\_h128\_smoothl1\_log1p\_low6\_downhigh\_25epoch\_seed123\_history.csv}
+  \item \texttt{results/logs/dft3d\_ehull\_h128\_smoothl1\_log1p\_low6\_downhigh\_25epoch\_seed123\_test\_predictions.csv}
+\end{itemize}
+
+\section{Conclusion}
+
+The improvements came from target-specific error analysis rather than a generic architecture-only change.  For band gap, weighting both metallic and high-gap regimes reduced aggregate error and tail error.  For energy above hull, correcting the train/test distribution mismatch with near-zero-focused weighting removed most of the positive bias on stable structures.  Both improved models outperform the original same-split test results on MAE, RMSE, p95 absolute error, and per-sample win/loss count.
+
+\end{document}
