@@ -121,13 +121,34 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--cutoff", type=float, default=8.0)
     alignn_train.add_argument("--max-neighbors", type=int, default=12)
     alignn_train.add_argument("--epochs", type=int, default=10)
+    alignn_train.add_argument("--seed", type=int, default=123)
     alignn_train.add_argument("--learning-rate", type=float, default=1e-3)
     alignn_train.add_argument("--weight-decay", type=float, default=1e-5)
     alignn_train.add_argument("--loss", choices=["l1", "mse", "smoothl1"], default="l1")
     alignn_train.add_argument("--scheduler", choices=["onecycle", "none"], default="onecycle")
+    alignn_train.add_argument(
+        "--target-transform",
+        choices=["none", "standardize", "log1p", "sqrt"],
+        default="none",
+        help="Transform targets during training while reporting metrics on the original scale.",
+    )
     alignn_train.add_argument("--positive-weight", type=float, default=1.0)
     alignn_train.add_argument("--high-positive-weight", type=float, default=1.0)
+    alignn_train.add_argument("--high-target-threshold", type=float, default=1.0)
+    alignn_train.add_argument("--low-target-weight", type=float, default=1.0)
+    alignn_train.add_argument("--low-target-threshold", type=float, default=0.0)
     alignn_train.add_argument("--mse-tail-weight", type=float, default=0.0)
+    alignn_train.add_argument(
+        "--prediction-min",
+        type=float,
+        default=None,
+        help="Optional lower bound applied to predictions for metrics and exported predictions.",
+    )
+    alignn_train.add_argument(
+        "--run-name",
+        default="alignn_small_subset",
+        help="Prefix for checkpoint, history, and prediction output files.",
+    )
     alignn_train.add_argument("--device", default=None)
     alignn_train.add_argument("--project-root", type=Path, default=Path.cwd())
     return parser
@@ -186,10 +207,12 @@ def main() -> None:
             cutoff=args.cutoff,
             max_neighbors=args.max_neighbors,
             epochs=args.epochs,
+            seed=args.seed,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
             loss_name=args.loss,
             scheduler_name=args.scheduler,
+            target_transform=args.target_transform,
             positive_weight=args.positive_weight,
             high_positive_weight=args.high_positive_weight,
             mse_tail_weight=args.mse_tail_weight,
@@ -231,8 +254,20 @@ def main() -> None:
             cutoff=args.cutoff,
             max_neighbors=args.max_neighbors,
             epochs=args.epochs,
+            seed=args.seed,
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
+            loss_name=args.loss,
+            scheduler_name=args.scheduler,
+            target_transform=args.target_transform,
+            positive_weight=args.positive_weight,
+            high_positive_weight=args.high_positive_weight,
+            high_target_threshold=args.high_target_threshold,
+            low_target_weight=args.low_target_weight,
+            low_target_threshold=args.low_target_threshold,
+            mse_tail_weight=args.mse_tail_weight,
+            prediction_min=args.prediction_min,
+            run_name=args.run_name,
             device=args.device,
         )
 
