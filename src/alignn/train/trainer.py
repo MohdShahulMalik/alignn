@@ -94,12 +94,20 @@ def _sample_weights(
     targets: torch.Tensor,
     positive_weight: float,
     high_positive_weight: float,
+    high_target_threshold: float,
+    low_target_weight: float,
+    low_target_threshold: float,
 ) -> torch.Tensor:
     weights = torch.ones_like(targets)
     weights = torch.where(targets > 0, torch.full_like(weights, positive_weight), weights)
     weights = torch.where(
-        targets > 1,
+        targets > high_target_threshold,
         torch.full_like(weights, high_positive_weight),
+        weights,
+    )
+    weights = torch.where(
+        targets <= low_target_threshold,
+        torch.full_like(weights, low_target_weight),
         weights,
     )
     return weights
@@ -108,9 +116,13 @@ def _sample_weights(
 def _weighted_regression_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
+    weight_targets: torch.Tensor,
     loss_name: str,
     positive_weight: float,
     high_positive_weight: float,
+    high_target_threshold: float,
+    low_target_weight: float,
+    low_target_threshold: float,
     mse_tail_weight: float,
 ) -> torch.Tensor:
     if loss_name == "mse":
@@ -126,12 +138,56 @@ def _weighted_regression_loss(
     else:
         raise ValueError(f"Unsupported loss: {loss_name}")
 
-    weights = _sample_weights(targets, positive_weight, high_positive_weight)
+    weights = _sample_weights(
+        weight_targets,
+        positive_weight,
+        high_positive_weight,
+        high_target_threshold,
+        low_target_weight,
+        low_target_threshold,
+    )
     loss = torch.mean(per_sample * weights)
     if mse_tail_weight > 0:
         tail_mse = (predictions - targets) ** 2
         loss = loss + mse_tail_weight * torch.mean(tail_mse * weights)
     return loss
+
+
+class _TargetTransform:
+    def __init__(self, name: str, targets: torch.Tensor) -> None:
+        self.name = name
+        self.mean = float(targets.mean().item())
+        self.std = float(targets.std(unbiased=False).clamp_min(1e-8).item())
+        if name in {"log1p", "sqrt"} and bool((targets < 0).any()):
+            raise ValueError(f"{name} target transform requires nonnegative targets.")
+        if name not in {"none", "standardize", "log1p", "sqrt"}:
+            raise ValueError(f"Unsupported target transform: {name}")
+
+    def forward(self, targets: torch.Tensor) -> torch.Tensor:
+        if self.name == "standardize":
+            return (targets - self.mean) / self.std
+        if self.name == "log1p":
+            return torch.log1p(targets)
+        if self.name == "sqrt":
+            return torch.sqrt(targets.clamp_min(0))
+        return targets
+
+    def inverse(self, predictions: torch.Tensor) -> torch.Tensor:
+        if self.name == "standardize":
+            return predictions * self.std + self.mean
+        if self.name == "log1p":
+            return torch.expm1(predictions).clamp_min(0)
+        if self.name == "sqrt":
+            return torch.square(predictions).clamp_min(0)
+        return predictions
+
+
+def _collect_targets(dataset: Subset | JarvisGraphDataset) -> torch.Tensor:
+    if isinstance(dataset, Subset):
+        targets = dataset.dataset.frame.iloc[list(dataset.indices)]["target"]
+    else:
+        targets = dataset.frame["target"]
+    return torch.tensor(targets.astype(float).tolist(), dtype=torch.float32)
 
 
 def _subset_or_full(dataset: JarvisGraphDataset, size: int) -> Subset | JarvisGraphDataset:
@@ -144,6 +200,8 @@ def _evaluate_alignn(
     model: ALIGNNModel,
     loader: DataLoader,
     device: torch.device,
+    target_transform: _TargetTransform | None = None,
+    prediction_min: float | None = None,
     return_predictions: bool = False,
 ) -> dict[str, float] | tuple[dict[str, float], list[dict[str, float | str]]]:
     model.eval()
@@ -156,6 +214,10 @@ def _evaluate_alignn(
             line_graph_batch = line_graph_batch.to(device)
             targets = targets.to(device)
             batch_predictions = model(graph_batch, line_graph_batch)
+            if target_transform is not None:
+                batch_predictions = target_transform.inverse(batch_predictions)
+            if prediction_min is not None:
+                batch_predictions = batch_predictions.clamp_min(prediction_min)
             predictions.append(batch_predictions.cpu())
             targets_all.append(targets.cpu())
             if return_predictions:
@@ -410,16 +472,26 @@ def train_alignn_small_subset(
     cutoff: float = 8.0,
     max_neighbors: int = 12,
     epochs: int = 10,
+    seed: int = 123,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
     loss_name: str = "l1",
     scheduler_name: str = "onecycle",
+    target_transform: str = "none",
     positive_weight: float = 1.0,
     high_positive_weight: float = 1.0,
+    high_target_threshold: float = 1.0,
+    low_target_weight: float = 1.0,
+    low_target_threshold: float = 0.0,
     mse_tail_weight: float = 0.0,
+    prediction_min: float | None = None,
+    run_name: str = "alignn_small_subset",
     device: str | None = None,
 ) -> None:
     project_root = project_root.resolve()
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     run_device = _device_from_name(device)
 
     train_dataset = _make_alignn_dataset(
@@ -449,11 +521,16 @@ def train_alignn_small_subset(
     train_subset = _subset_or_full(train_dataset, train_subset_size)
     val_subset = _subset_or_full(val_dataset, val_subset_size)
     test_subset = _subset_or_full(test_dataset, test_subset_size)
+    transform = _TargetTransform(
+        name=target_transform,
+        targets=_collect_targets(train_subset),
+    )
 
     train_loader = DataLoader(
         train_subset,
         batch_size=min(batch_size, len(train_subset)),
         shuffle=True,
+        generator=torch.Generator().manual_seed(seed),
         collate_fn=collate_graph_samples_with_line_graph,
     )
     val_loader = DataLoader(
@@ -509,12 +586,17 @@ def train_alignn_small_subset(
             targets = targets.to(run_device)
 
             predictions = model(graph_batch, line_graph_batch)
+            loss_targets = transform.forward(targets)
             loss = _weighted_regression_loss(
                 predictions=predictions,
-                targets=targets,
+                targets=loss_targets,
+                weight_targets=targets,
                 loss_name=loss_name,
                 positive_weight=positive_weight,
                 high_positive_weight=high_positive_weight,
+                high_target_threshold=high_target_threshold,
+                low_target_weight=low_target_weight,
+                low_target_threshold=low_target_threshold,
                 mse_tail_weight=mse_tail_weight,
             )
 
@@ -525,14 +607,23 @@ def train_alignn_small_subset(
                 scheduler.step()
 
             train_losses.append(float(loss.item()))
-            train_predictions.append(predictions.detach().cpu())
+            metric_predictions = transform.inverse(predictions)
+            if prediction_min is not None:
+                metric_predictions = metric_predictions.clamp_min(prediction_min)
+            train_predictions.append(metric_predictions.detach().cpu())
             train_targets.append(targets.detach().cpu())
 
         train_metrics = _regression_metrics(
             torch.cat(train_predictions),
             torch.cat(train_targets),
         )
-        val_metrics = _evaluate_alignn(model, val_loader, run_device)
+        val_metrics = _evaluate_alignn(
+            model,
+            val_loader,
+            run_device,
+            target_transform=transform,
+            prediction_min=prediction_min,
+        )
         mean_loss = sum(train_losses) / max(len(train_losses), 1)
         history.append(
             {
@@ -569,13 +660,19 @@ def train_alignn_small_subset(
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_path = checkpoints_dir / "alignn_small_subset.pt"
+    safe_run_name = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in run_name
+    ).strip("_") or "alignn_small_subset"
+    checkpoint_path = checkpoints_dir / f"{safe_run_name}.pt"
     if best_state is not None:
         model.load_state_dict(best_state)
     test_metrics, test_rows = _evaluate_alignn(
         model,
         test_loader,
         run_device,
+        target_transform=transform,
+        prediction_min=prediction_min,
         return_predictions=True,
     )
     torch.save(
@@ -586,6 +683,7 @@ def train_alignn_small_subset(
             "train_subset_size": len(train_subset),
             "val_subset_size": len(val_subset),
             "test_subset_size": len(test_subset),
+            "seed": seed,
             "best_val_mae": best_val_mae,
             "test_mae": test_metrics["mae"],
             "test_rmse": test_metrics["rmse"],
@@ -594,9 +692,14 @@ def train_alignn_small_subset(
             "gcn_layers": gcn_layers,
             "loss": loss_name,
             "scheduler": scheduler_name,
+            "target_transform": target_transform,
             "positive_weight": positive_weight,
             "high_positive_weight": high_positive_weight,
+            "high_target_threshold": high_target_threshold,
+            "low_target_weight": low_target_weight,
+            "low_target_threshold": low_target_threshold,
             "mse_tail_weight": mse_tail_weight,
+            "prediction_min": prediction_min,
             "test_nonnegative_mae": test_metrics["nonnegative_mae"],
             "test_high_positive_mae": test_metrics["high_positive_mae"],
             "test_p95_abs_error": test_metrics["p95_abs_error"],
@@ -605,7 +708,7 @@ def train_alignn_small_subset(
         checkpoint_path,
     )
 
-    history_path = logs_dir / "alignn_small_subset_history.csv"
+    history_path = logs_dir / f"{safe_run_name}_history.csv"
     with history_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
@@ -625,7 +728,7 @@ def train_alignn_small_subset(
         writer.writeheader()
         writer.writerows(history)
 
-    predictions_path = logs_dir / "alignn_small_subset_test_predictions.csv"
+    predictions_path = logs_dir / f"{safe_run_name}_test_predictions.csv"
     with predictions_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
