@@ -485,6 +485,8 @@ def train_alignn_small_subset(
     low_target_threshold: float = 0.0,
     mse_tail_weight: float = 0.0,
     prediction_min: float | None = None,
+    selection_metric: str = "mae",
+    readout: str = "mean",
     run_name: str = "alignn_small_subset",
     device: str | None = None,
 ) -> None:
@@ -552,6 +554,7 @@ def train_alignn_small_subset(
         hidden_dim=hidden_dim,
         alignn_layers=alignn_layers,
         gcn_layers=gcn_layers,
+        readout=readout,
     ).to(run_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     if loss_name not in {"mse", "smoothl1", "l1"}:
@@ -571,7 +574,9 @@ def train_alignn_small_subset(
         raise ValueError(f"Unsupported scheduler: {scheduler_name}")
 
     history: list[dict[str, float]] = []
-    best_val_mae = float("inf")
+    if selection_metric not in {"mae", "rmse"}:
+        raise ValueError(f"Unsupported selection metric: {selection_metric}")
+    best_val_score = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
 
     for epoch in range(1, epochs + 1):
@@ -640,8 +645,9 @@ def train_alignn_small_subset(
             }
         )
 
-        if val_metrics["mae"] < best_val_mae:
-            best_val_mae = val_metrics["mae"]
+        val_score = val_metrics[selection_metric]
+        if val_score < best_val_score:
+            best_val_score = val_score
             best_state = {
                 key: value.detach().cpu().clone()
                 for key, value in model.state_dict().items()
@@ -684,7 +690,8 @@ def train_alignn_small_subset(
             "val_subset_size": len(val_subset),
             "test_subset_size": len(test_subset),
             "seed": seed,
-            "best_val_mae": best_val_mae,
+            "selection_metric": selection_metric,
+            "best_val_score": best_val_score,
             "test_mae": test_metrics["mae"],
             "test_rmse": test_metrics["rmse"],
             "hidden_dim": hidden_dim,
@@ -693,6 +700,7 @@ def train_alignn_small_subset(
             "loss": loss_name,
             "scheduler": scheduler_name,
             "target_transform": target_transform,
+            "readout": readout,
             "positive_weight": positive_weight,
             "high_positive_weight": high_positive_weight,
             "high_target_threshold": high_target_threshold,
@@ -739,7 +747,7 @@ def train_alignn_small_subset(
 
     print(
         "ALIGNN small-subset training finished: "
-        f"best_val_mae={best_val_mae:.6f}, "
+        f"best_val_{selection_metric}={best_val_score:.6f}, "
         f"test_mae={test_metrics['mae']:.6f}, "
         f"test_rmse={test_metrics['rmse']:.6f}, "
         f"test_high_pos_mae={test_metrics['high_positive_mae']:.6f}, "
