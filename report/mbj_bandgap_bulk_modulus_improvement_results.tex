@@ -1,0 +1,329 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  keepspaces=true,
+  backgroundcolor=\color{gray!5}
+}
+
+\title{Progress Report: ALIGNN Improvements for \texttt{mbj\_bandgap} and \texttt{bulk\_modulus\_kv}}
+\author{ALIGNN Reimplementation Study}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+
+This report documents progress on two additional JARVIS \texttt{dft\_3d} targets:
+\begin{itemize}
+  \item \texttt{mbj\_bandgap}
+  \item \texttt{bulk\_modulus\_kv}
+\end{itemize}
+
+The goal was to train the reimplemented ALIGNN model on the same targets used by the original repository and improve prediction quality relative to the original implementation.  All comparisons in this report use the same dataset, target, train/validation/test JIDs, and 1000-sample test split as the corresponding original run in \texttt{\$HOME/projects/2d-alignn}.  The reimplementation runs were executed under \texttt{\$HOME/projects/alignn} on the remote GPU instance.
+
+\section{Fair Comparison Setup}
+
+The original repository did not already contain saved comparison artifacts for these two targets, so fresh original baselines were trained with the same comparison protocol used for the earlier targets:
+\begin{itemize}
+  \item Dataset: \texttt{dft\_3d}
+  \item Train/validation/test sizes: \texttt{8000/1000/1000}
+  \item Random seed: \texttt{123}
+  \item Original model path: \texttt{alignn\_atomwise}, used as graph-level regression with graphwise weight \texttt{1.0} and atomwise/force/stress weights \texttt{0.0}
+  \item Original budget: \texttt{10} epochs, batch size \texttt{16}, learning rate \texttt{0.001}, weight decay \texttt{1e-5}, one-cycle scheduler, MSE objective
+  \item Graph settings: cutoff \texttt{8.0}, max neighbors \texttt{12}, line graph enabled
+\end{itemize}
+
+The exact original split IDs were imported into the reimplementation from:
+\begin{itemize}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_mbj\_bandgap\_atomwise\_full10/ids\_train\_val\_test.json}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_bulk\_modulus\_kv\_atomwise\_full10/ids\_train\_val\_test.json}
+\end{itemize}
+
+This produced matching split files under \texttt{\$HOME/projects/alignn/data/splits}.
+
+\section{Implementation Progress}
+
+\subsection{Sparse Target Import Fix}
+
+When importing the exact original splits for these targets, the split importer initially failed because the raw JARVIS target columns include string values such as \texttt{na}.  Earlier targets did not expose this problem because their target columns were fully numeric after filtering.
+
+The importer was fixed in \texttt{src/alignn/data/jarvis.py} by converting target columns with \texttt{pandas.to\_numeric(..., errors=``coerce'')} and dropping rows whose converted target is missing.  This does not alter the original split IDs or target values used for valid samples; it only makes the dataset builder robust to invalid sparse-target rows in the raw JARVIS table.
+
+\subsection{Model and Training Controls Already Available}
+
+The reimplementation already included several improvements over the original comparison baseline:
+\begin{itemize}
+  \item CGCNN/JARVIS atom features instead of repeated atomic-number features.
+  \item Original-style normalized edge-gated graph convolution with residual updates, batch normalization, and SiLU activations.
+  \item Recursive cutoff expansion, periodic edge canonicalization, and explicit reverse edges in graph construction.
+  \item Validation and test loaders using \texttt{drop\_last=False}, so no held-out samples are silently omitted.
+  \item Seeded training and seeded data-loader shuffling.
+  \item Target transforms, robust losses, target-range-aware weighting, and optional physical prediction bounds.
+\end{itemize}
+
+\subsection{Readout Experiment for Bulk Modulus}
+
+For \texttt{bulk\_modulus\_kv}, the largest RMSE failures were hard outliers, including high-modulus structures that the best single model underpredicted.  To test whether mean graph pooling was washing out strong local structural signals, a new model readout option was added:
+\begin{itemize}
+  \item \texttt{--readout mean}: original mean atom pooling, default behavior.
+  \item \texttt{--readout meanmax}: concatenates mean-pooled and max-pooled atom features before the regression head.
+\end{itemize}
+
+The trainer was also extended with \texttt{--selection-metric mae|rmse}, allowing checkpoint selection by validation RMSE when the objective is specifically to reduce squared-error outliers.  The initial \texttt{meanmax} high-tail experiment did not improve test RMSE, but the code path remains useful for future single-model experiments.
+
+\section{Target 1: \texttt{mbj\_bandgap}}
+
+\subsection{Target Characteristics}
+
+The \texttt{mbj\_bandgap} target is nonnegative and heavily zero-inflated.  Across the valid \texttt{dft\_3d} records inspected before training, approximately \texttt{54\%} of samples have exactly zero band gap.  This makes the task similar to \texttt{optb88vdw\_bandgap}, but with a stronger metal/nonmetal imbalance.
+
+\subsection{Original Baseline}
+
+The original same-split run was saved at:
+\begin{itemize}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_mbj\_bandgap\_atomwise\_full10}
+\end{itemize}
+
+Original test metrics on the 1000 exact test JIDs were:
+\begin{itemize}
+  \item MAE: \texttt{1.006647}
+  \item RMSE: \texttt{1.624500}
+  \item P95 absolute error: \texttt{3.312350}
+  \item Bias: \texttt{0.624302}
+\end{itemize}
+
+\subsection{Improved Reimplementation Run}
+
+The reimplementation beat the original at the same basic budget without target-specific tuning:
+\begin{itemize}
+  \item Run name: \texttt{dft3d\_mbj\_bandgap\_h64\_mse\_10epoch\_same\_split}
+  \item Hidden dimension: \texttt{64}
+  \item ALIGNN/GCN layers: \texttt{4 + 4}
+  \item Epochs: \texttt{10}
+  \item Loss: \texttt{mse}
+  \item Scheduler: \texttt{onecycle}
+  \item Target transform: \texttt{none}
+  \item Seed: \texttt{123}
+\end{itemize}
+
+Test metrics were:
+\begin{itemize}
+  \item MAE: \texttt{0.899689}
+  \item RMSE: \texttt{1.399274}
+  \item P95 absolute error: \texttt{2.945925}
+  \item Bias: \texttt{0.453202}
+  \item Per-sample wins/losses versus original: \texttt{496/504}
+\end{itemize}
+
+\subsection{What Was Better Than the Original}
+
+For \texttt{mbj\_bandgap}, the improvement came from the corrected reimplementation itself rather than extra tuning.  The same-budget run benefited from better atom features, more faithful edge-gated message passing, improved graph construction, reproducible training, and complete validation/test evaluation.  These changes reduced aggregate MAE, RMSE, P95 error, and positive prediction bias relative to the original run.
+
+\section{Target 2: \texttt{bulk\_modulus\_kv}}
+
+\subsection{Target Characteristics}
+
+The \texttt{bulk\_modulus\_kv} target is mostly nonnegative but broad and skewed.  The exact imported split showed:
+\begin{itemize}
+  \item Train: mean \texttt{86.44}, median \texttt{68.56}, min \texttt{-20.28}, P95 \texttt{213.04}, max \texttt{419.28}
+  \item Validation: mean \texttt{75.05}, median \texttt{49.03}, min \texttt{-12.49}, P95 \texttt{218.88}, max \texttt{382.37}
+  \item Test: mean \texttt{83.85}, median \texttt{65.10}, min \texttt{-6.73}, P95 \texttt{210.29}, max \texttt{399.46}
+\end{itemize}
+
+The target contains a small number of negative values, so transforms such as \texttt{sqrt} and \texttt{log1p} are not directly valid without changing the target values.  We did not change the dataset or target labels.
+
+\subsection{Original Baseline}
+
+The original same-split run was saved at:
+\begin{itemize}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_bulk\_modulus\_kv\_atomwise\_full10}
+\end{itemize}
+
+Original test metrics on the 1000 exact test JIDs were:
+\begin{itemize}
+  \item MAE: \texttt{14.717643}
+  \item RMSE: \texttt{24.145936}
+  \item P95 absolute error: \texttt{53.336529}
+  \item Bias: \texttt{5.690111}
+\end{itemize}
+
+\subsection{Same-Budget Reimplementation Baseline}
+
+The first reimplementation run matched the original budget and architecture scale:
+\begin{itemize}
+  \item Run name: \texttt{dft3d\_bulk\_modulus\_kv\_h64\_mse\_10epoch\_same\_split}
+  \item MAE: \texttt{16.665335}
+  \item RMSE: \texttt{25.413759}
+  \item P95 absolute error: \texttt{52.332005}
+\end{itemize}
+
+This baseline improved P95 slightly but did not beat the original on MAE or RMSE.  Error profiling showed that the model lost most heavily in the \texttt{5--50} and \texttt{>200} target ranges.
+
+\subsection{Best Single-Model MAE/P95 Improvement}
+
+The best single-model run used a wider model, a longer schedule, robust loss, mild low-target downweighting, high-target upweighting, and a nonnegative prediction bound:
+\begin{itemize}
+  \item Run name: \texttt{dft3d\_bulk\_modulus\_kv\_h128\_smoothl1\_low08\_high2\_clamp\_25epoch\_seed123}
+  \item Hidden dimension: \texttt{128}
+  \item Epochs: \texttt{25}
+  \item Loss: \texttt{smoothl1}
+  \item Low-target weighting: \texttt{--low-target-threshold 10 --low-target-weight 0.8}
+  \item High-target weighting: \texttt{--high-target-threshold 200 --high-positive-weight 2.0}
+  \item Prediction lower bound: \texttt{--prediction-min 0}
+\end{itemize}
+
+Test metrics were:
+\begin{itemize}
+  \item MAE: \texttt{14.505715}
+  \item RMSE: \texttt{24.541145}
+  \item P95 absolute error: \texttt{46.439491}
+  \item Bias: \texttt{3.750599}
+  \item Per-sample wins/losses versus original: \texttt{515/485}
+\end{itemize}
+
+This single model beat the original on MAE and P95 error, but not RMSE.  The remaining RMSE problem came from a small number of hard outliers, including duplicate or related high-modulus structures where the model underpredicted more than the original.
+
+\subsection{RMSE-Focused Experiments}
+
+Several RMSE-focused attempts were evaluated without changing the dataset:
+\begin{itemize}
+  \item A standardized \texttt{smoothl1} run improved validation behavior but produced test MAE \texttt{17.044559} and RMSE \texttt{26.315956}.
+  \item A longer \texttt{mse} run with hidden dimension \texttt{128} produced test MAE \texttt{16.869547} and RMSE \texttt{26.084501}.
+  \item A \texttt{meanmax} readout model with high-target weighting and validation-RMSE checkpoint selection produced test MAE \texttt{18.159342} and RMSE \texttt{28.236582}.
+\end{itemize}
+
+These single-model attempts did not fix RMSE.  The outcome suggests that simply making the loss more squared-error-heavy or adding max pooling is not sufficient; the model still needs a better way to identify the rare high-modulus structures that dominate RMSE.
+
+\subsection{Validation-Selected Ensemble Result}
+
+Because independently trained models made complementary errors, a validation-selected ensemble was evaluated.  The weights were selected on the validation split using RMSE, then applied once to the unchanged test split.  No test labels were used to select the weights, and the dataset itself was not modified.
+
+The ensemble combined:
+\begin{itemize}
+  \item \texttt{0.16} $\times$ \texttt{dft3d\_bulk\_modulus\_kv\_h64\_mse\_10epoch\_same\_split}
+  \item \texttt{0.17} $\times$ \texttt{dft3d\_bulk\_modulus\_kv\_h128\_smoothl1\_standardize\_clamp\_25epoch\_seed123}
+  \item \texttt{0.67} $\times$ \texttt{dft3d\_bulk\_modulus\_kv\_h128\_smoothl1\_low08\_high2\_clamp\_25epoch\_seed123}
+\end{itemize}
+
+The ensemble test metrics were:
+\begin{itemize}
+  \item MAE: \texttt{14.327456}
+  \item RMSE: \texttt{23.808155}
+  \item P95 absolute error: \texttt{44.968660}
+\end{itemize}
+
+This is the best current \texttt{bulk\_modulus\_kv} result by the combined MAE/RMSE/P95 criteria.  However, it should be interpreted separately from the strict single-model result: it is a model-level validation-selected ensemble, not a single checkpoint that independently solved the outlier problem.
+
+\section{Results Summary}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llrrrr}
+\toprule
+Target & Run Type & MAE & RMSE & P95 Abs. Error & Wins/Losses \\
+\midrule
+\texttt{mbj\_bandgap} & Original & 1.00665 & 1.62450 & 3.31235 & -- \\
+\texttt{mbj\_bandgap} & Same-budget reimplementation & \textbf{0.89969} & \textbf{1.39927} & \textbf{2.94592} & 496/504 \\
+\texttt{bulk\_modulus\_kv} & Original & 14.71764 & 24.14594 & 53.33653 & -- \\
+\texttt{bulk\_modulus\_kv} & Best single model & \textbf{14.50571} & 24.54114 & \textbf{46.43949} & \textbf{515/485} \\
+\texttt{bulk\_modulus\_kv} & Validation-selected ensemble & \textbf{14.32746} & \textbf{23.80816} & \textbf{44.96866} & -- \\
+\bottomrule
+\end{tabular}
+\caption{Same-split test metrics on 1000 original test JIDs per target.  The bulk-modulus ensemble is listed separately because it combines multiple trained models using validation-selected weights.}
+\end{table}
+
+\section{Reproduction Commands}
+
+All commands below are intended to run on the remote instance from \texttt{\$HOME/projects/alignn}.
+
+\subsection{\texttt{mbj\_bandgap}: Improved Same-Budget Run}
+
+\begin{lstlisting}[language=bash]
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/projects/alignn" && uv run alignn alignn-train-small \
+  --dataset dft_3d \
+  --target mbj_bandgap \
+  --train-subset-size 0 \
+  --val-subset-size 0 \
+  --test-subset-size 0 \
+  --batch-size 16 \
+  --hidden-dim 64 \
+  --alignn-layers 4 \
+  --gcn-layers 4 \
+  --epochs 10 \
+  --seed 123 \
+  --learning-rate 0.001 \
+  --weight-decay 0.00001 \
+  --loss mse \
+  --scheduler onecycle \
+  --target-transform none \
+  --run-name dft3d_mbj_bandgap_h64_mse_10epoch_same_split \
+  --project-root "$HOME/projects/alignn"
+\end{lstlisting}
+
+\subsection{\texttt{bulk\_modulus\_kv}: Best Single-Model MAE/P95 Run}
+
+\begin{lstlisting}[language=bash]
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/projects/alignn" && uv run alignn alignn-train-small \
+  --dataset dft_3d \
+  --target bulk_modulus_kv \
+  --train-subset-size 0 \
+  --val-subset-size 0 \
+  --test-subset-size 0 \
+  --batch-size 16 \
+  --hidden-dim 128 \
+  --alignn-layers 4 \
+  --gcn-layers 4 \
+  --epochs 25 \
+  --seed 123 \
+  --learning-rate 0.001 \
+  --weight-decay 0.00001 \
+  --loss smoothl1 \
+  --scheduler onecycle \
+  --target-transform none \
+  --low-target-threshold 10 \
+  --low-target-weight 0.8 \
+  --high-target-threshold 200 \
+  --high-positive-weight 2.0 \
+  --prediction-min 0 \
+  --run-name dft3d_bulk_modulus_kv_h128_smoothl1_low08_high2_clamp_25epoch_seed123 \
+  --project-root "$HOME/projects/alignn"
+\end{lstlisting}
+
+\section{Artifact Paths}
+
+Important reimplementation artifacts:
+\begin{itemize}
+  \item \texttt{results/logs/dft3d\_mbj\_bandgap\_h64\_mse\_10epoch\_same\_split\_test\_predictions.csv}
+  \item \texttt{results/checkpoints/dft3d\_mbj\_bandgap\_h64\_mse\_10epoch\_same\_split.pt}
+  \item \texttt{results/logs/dft3d\_bulk\_modulus\_kv\_h128\_smoothl1\_low08\_high2\_clamp\_25epoch\_seed123\_test\_predictions.csv}
+  \item \texttt{results/checkpoints/dft3d\_bulk\_modulus\_kv\_h128\_smoothl1\_low08\_high2\_clamp\_25epoch\_seed123.pt}
+  \item \texttt{results/logs/dft3d\_bulk\_modulus\_kv\_val\_selected\_ensemble\_test\_predictions.csv}
+  \item \texttt{results/logs/dft3d\_bulk\_modulus\_kv\_val\_selected\_ensemble\_metrics.json}
+\end{itemize}
+
+Original comparison artifacts:
+\begin{itemize}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_mbj\_bandgap\_atomwise\_full10/Test\_results.json}
+  \item \texttt{\$HOME/projects/2d-alignn/fair\_compare\_dft3d\_bulk\_modulus\_kv\_atomwise\_full10/Test\_results.json}
+\end{itemize}
+
+\section{Conclusion and Next Step}
+
+For \texttt{mbj\_bandgap}, the reimplementation clearly outperformed the original with the same basic training budget.  The improvement came from the corrected ALIGNN implementation and data pipeline rather than target-specific tuning.
+
+For \texttt{bulk\_modulus\_kv}, the best single model improved MAE, P95 error, bias, and per-sample win count, but still had slightly worse RMSE than the original because a few large outliers remained.  A validation-selected ensemble improved MAE, RMSE, and P95 simultaneously, showing that the trained models contain complementary information.  The remaining strict research task is to turn that ensemble behavior into a single-model improvement, likely by improving the representation or objective for rare high-modulus structures rather than by changing the dataset.
+
+\end{document}
