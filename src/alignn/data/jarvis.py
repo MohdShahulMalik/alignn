@@ -38,7 +38,8 @@ def _build_dataframe(records: list[dict], target_column: str) -> pd.DataFrame:
         )
 
     filtered = frame.loc[frame[target_column].notna() & frame["atoms"].notna()].copy()
-    filtered["target"] = filtered[target_column].astype(float)
+    filtered["target"] = pd.to_numeric(filtered[target_column], errors="coerce")
+    filtered = filtered.loc[filtered["target"].notna()].copy()
     filtered["num_atoms"] = filtered["atoms"].map(
         lambda atoms: len(atoms["elements"]) if isinstance(atoms, dict) else None
     )
