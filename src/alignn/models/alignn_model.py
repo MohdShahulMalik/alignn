@@ -44,8 +44,12 @@ class ALIGNNModel(nn.Module):
         num_elements: int = 100,
         bond_rbf_bins: int = 80,
         angle_rbf_bins: int = 40,
+        readout: str = "mean",
     ) -> None:
         super().__init__()
+        if readout not in {"mean", "meanmax"}:
+            raise ValueError(f"Unsupported ALIGNN readout: {readout}")
+        self.readout_name = readout
         self.encoder = CrystalFeatureEncoder(
             num_elements=num_elements,
             rbf_bins=bond_rbf_bins,
@@ -58,7 +62,8 @@ class ALIGNNModel(nn.Module):
         self.gcn_layers = nn.ModuleList(
             [EdgeGatedGraphConv(hidden_dim=hidden_dim) for _ in range(gcn_layers)]
         )
-        self.readout = nn.Linear(hidden_dim, 1)
+        readout_dim = hidden_dim * 2 if readout == "meanmax" else hidden_dim
+        self.readout = nn.Linear(readout_dim, 1)
 
     def forward(self, g: dgl.DGLGraph, lg: dgl.DGLGraph) -> torch.Tensor:
         atom_feats, bond_feats, angle_feats = self.encoder(g, lg)
@@ -80,5 +85,7 @@ class ALIGNNModel(nn.Module):
         with g.local_scope():
             g.ndata["h"] = atom_feats
             graph_feats = dgl.mean_nodes(g, "h")
+            if self.readout_name == "meanmax":
+                graph_feats = torch.cat([graph_feats, dgl.max_nodes(g, "h")], dim=-1)
 
         return self.readout(graph_feats).squeeze(-1)
