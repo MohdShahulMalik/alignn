@@ -139,6 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--low-target-threshold", type=float, default=0.0)
     alignn_train.add_argument("--mse-tail-weight", type=float, default=0.0)
     alignn_train.add_argument(
+        "--readout",
+        choices=["mean", "meanmax"],
+        default="mean",
+        help="Graph pooling used by ALIGNN before the regression head.",
+    )
+    alignn_train.add_argument(
+        "--selection-metric",
+        choices=["mae", "rmse"],
+        default="mae",
+        help="Validation metric used to select the checkpoint.",
+    )
+    alignn_train.add_argument(
         "--prediction-min",
         type=float,
         default=None,
@@ -267,6 +279,8 @@ def main() -> None:
             low_target_threshold=args.low_target_threshold,
             mse_tail_weight=args.mse_tail_weight,
             prediction_min=args.prediction_min,
+            selection_metric=args.selection_metric,
+            readout=args.readout,
             run_name=args.run_name,
             device=args.device,
         )
