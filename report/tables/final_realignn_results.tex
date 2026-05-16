@@ -1,0 +1,39 @@
+\begingroup
+\small
+\setlength{\tabcolsep}{4.5pt}
+
+\begin{center}
+\textbf{Main Test Metrics}\\[0.35em]
+\begin{tabular}{llrrrrrr}
+\toprule
+Target & Model & Orig. MAE & Our MAE & MAE Gain & Orig. RMSE & Our RMSE & RMSE Gain \\
+\midrule
+Form. energy & Single & 0.1165 & 0.0923 & 20.8\% & 0.1651 & 0.1468 & 11.1\% \\
+optB88 gap & Single & 0.2681 & 0.2349 & 12.4\% & 0.6487 & 0.6092 & 6.1\% \\
+Ehull & Single & 0.0550 & 0.0321 & 41.6\% & 0.0873 & 0.0736 & 15.6\% \\
+MBJ gap & Single & 1.0066 & 0.8997 & 10.6\% & 1.6245 & 1.3993 & 13.9\% \\
+Bulk modulus & Single & 14.7176 & 14.5057 & 1.4\% & 24.1459 & 24.5411 & -1.6\% \\
+Bulk modulus & Ensemble & 14.7176 & 14.3275 & 2.7\% & 24.1459 & 23.8082 & 1.4\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{0.8em}
+
+\begin{center}
+\textbf{Tail Error and Per-Sample Wins}\\[0.35em]
+\begin{tabular}{llrrrr}
+\toprule
+Target & Model & Orig. P95 & Our P95 & P95 Gain & Wins/Losses \\
+\midrule
+Form. energy & Single & 0.3320 & 0.2851 & 14.1\% & 606/394 \\
+optB88 gap & Single & 1.4761 & 1.1939 & 19.1\% & 717/283 \\
+Ehull & Single & 0.1766 & 0.1535 & 13.1\% & 788/212 \\
+MBJ gap & Single & 3.3123 & 2.9459 & 11.1\% & 496/504 \\
+Bulk modulus & Single & 53.3365 & 46.4395 & 12.9\% & 515/485 \\
+Bulk modulus & Ensemble & 53.3365 & 44.9687 & 15.7\% & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\endgroup

@@ -1,0 +1,86 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Final ReALIGNN Result Tables and Figures}
+\author{ALIGNN Reimplementation Study}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+
+This document summarizes the final result tables and plots for ReALIGNN, our reimplementation and target-specific improvement of the original local ALIGNN baseline.  The final result set includes formation energy and the four follow-up targets:
+\begin{itemize}
+  \item \texttt{formation\_energy\_peratom}
+  \item \texttt{optb88vdw\_bandgap}
+  \item \texttt{ehull}
+  \item \texttt{mbj\_bandgap}
+  \item \texttt{bulk\_modulus\_kv}
+\end{itemize}
+
+No additional training was required for this final figure-generation step.  The plots and tables were generated from the completed same-split comparison results documented in the target reports under \texttt{report/} and from the saved prediction artifacts under \texttt{results/logs/}.
+
+\section{Final Tables}
+
+The machine-readable table is available at:
+\begin{verbatim}
+report/tables/final_realignn_results.csv
+\end{verbatim}
+
+The LaTeX table source is available at:
+\begin{verbatim}
+report/tables/final_realignn_results.tex
+\end{verbatim}
+
+\input{tables/final_realignn_results.tex}
+
+\section{Figures}
+
+The final figures were exported as both \texttt{.png} and \texttt{.pdf} files under \texttt{report/figures/}.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_mae_comparison.pdf}
+\caption{Same-split test MAE comparison between the original ALIGNN baseline and ReALIGNN.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_rmse_comparison.pdf}
+\caption{Same-split test RMSE comparison for strict single-model ReALIGNN runs.  The strict single-model bulk-modulus run improves MAE and P95 error but not RMSE.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_rmse_comparison_with_bulk_ensemble.pdf}
+\caption{RMSE comparison including the validation-selected \texttt{bulk\_modulus\_kv} ensemble.  This ensemble is listed separately from strict single-model results.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_p95_comparison.pdf}
+\caption{P95 absolute error comparison.  ReALIGNN reduces tail error for all strict single-model targets shown.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_relative_improvements.pdf}
+\caption{Relative improvement percentages for MAE, RMSE, and P95 absolute error.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/final_per_sample_wins.pdf}
+\caption{Per-sample win/loss counts on the exact same 1000 test JIDs for strict single-model runs.}
+\end{figure}
+
+\section{Interpretation}
+
+ReALIGNN improves the original same-split baseline for formation energy, \texttt{optb88vdw\_bandgap}, \texttt{ehull}, and \texttt{mbj\_bandgap} across MAE, RMSE, and P95 absolute error.  For \texttt{bulk\_modulus\_kv}, the best strict single model improves MAE and P95 error but has slightly worse RMSE due to a small number of hard high-error structures.  The validation-selected ensemble improves bulk-modulus MAE, RMSE, and P95 simultaneously, but is reported separately because it combines multiple trained ReALIGNN checkpoints.
+
+\end{document}
