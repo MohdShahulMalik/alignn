@@ -22,6 +22,15 @@ class GraphTargetSample:
     jid: str
 
 
+@dataclass
+class MultiTaskGraphTargetSample:
+    crystal: CrystalGraph
+    target: torch.Tensor
+    jid: str
+    target_name: str
+    target_id: int
+
+
 def _resolve_raw_archive(project_root: Path, dataset_name: str) -> Path:
     raw_dir = project_root / "data" / "raw"
     patterns = [f"{dataset_name}*.json.zip", f"{dataset_name}*.zip"]
@@ -120,6 +129,34 @@ class JarvisGraphDataset(Dataset[GraphTargetSample]):
         )
 
 
+class TargetLabeledGraphDataset(Dataset[MultiTaskGraphTargetSample]):
+    """Wrap a single-target graph dataset with multi-task target metadata."""
+
+    def __init__(
+        self,
+        dataset: JarvisGraphDataset,
+        target_name: str,
+        target_id: int,
+    ) -> None:
+        self.dataset = dataset
+        self.target_name = target_name
+        self.target_id = target_id
+        self.frame = dataset.frame
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> MultiTaskGraphTargetSample:
+        sample = self.dataset[index]
+        return MultiTaskGraphTargetSample(
+            crystal=sample.crystal,
+            target=sample.target,
+            jid=sample.jid,
+            target_name=self.target_name,
+            target_id=self.target_id,
+        )
+
+
 def collate_graph_samples(
     samples: list[GraphTargetSample],
 ) -> tuple[dgl.DGLGraph, torch.Tensor, list[str]]:
@@ -137,3 +174,15 @@ def collate_graph_samples_with_line_graph(
     targets = torch.stack([sample.target for sample in samples])
     jids = [sample.jid for sample in samples]
     return dgl.batch(graphs), dgl.batch(line_graphs), targets, jids
+
+
+def collate_multitask_graph_samples_with_line_graph(
+    samples: list[MultiTaskGraphTargetSample],
+) -> tuple[dgl.DGLGraph, dgl.DGLGraph, torch.Tensor, list[str], list[str], torch.Tensor]:
+    graphs = [sample.crystal.g for sample in samples]
+    line_graphs = [sample.crystal.lg for sample in samples]
+    targets = torch.stack([sample.target for sample in samples])
+    jids = [sample.jid for sample in samples]
+    target_names = [sample.target_name for sample in samples]
+    target_ids = torch.tensor([sample.target_id for sample in samples], dtype=torch.long)
+    return dgl.batch(graphs), dgl.batch(line_graphs), targets, jids, target_names, target_ids

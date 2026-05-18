@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import torch
@@ -9,10 +10,12 @@ from torch.utils.data import DataLoader, Subset
 
 from alignn.data.dataset import (
     JarvisGraphDataset,
+    TargetLabeledGraphDataset,
     collate_graph_samples,
     collate_graph_samples_with_line_graph,
+    collate_multitask_graph_samples_with_line_graph,
 )
-from alignn.models.alignn_model import ALIGNNModel
+from alignn.models.alignn_model import ALIGNNModel, MultiTaskALIGNNModel
 from alignn.models.baseline_gnn import BaselineGNN
 
 
@@ -182,18 +185,37 @@ class _TargetTransform:
         return predictions
 
 
-def _collect_targets(dataset: Subset | JarvisGraphDataset) -> torch.Tensor:
+def _collect_targets(dataset: Subset | JarvisGraphDataset | TargetLabeledGraphDataset) -> torch.Tensor:
     if isinstance(dataset, Subset):
-        targets = dataset.dataset.frame.iloc[list(dataset.indices)]["target"]
-    else:
-        targets = dataset.frame["target"]
+        parent_targets = _collect_targets(dataset.dataset)
+        return parent_targets[list(dataset.indices)]
+    if isinstance(dataset, TargetLabeledGraphDataset):
+        return _collect_targets(dataset.dataset)
+    targets = dataset.frame["target"]
     return torch.tensor(targets.astype(float).tolist(), dtype=torch.float32)
 
 
-def _subset_or_full(dataset: JarvisGraphDataset, size: int) -> Subset | JarvisGraphDataset:
+def _subset_or_full(
+    dataset: Subset | JarvisGraphDataset | TargetLabeledGraphDataset,
+    size: int,
+) -> Subset | JarvisGraphDataset | TargetLabeledGraphDataset:
     if size <= 0:
         return dataset
     return Subset(dataset, range(min(size, len(dataset))))
+
+
+def _fraction_subset(
+    dataset: JarvisGraphDataset | TargetLabeledGraphDataset,
+    fraction: float,
+    seed: int,
+) -> Subset | JarvisGraphDataset | TargetLabeledGraphDataset:
+    if fraction <= 0 or fraction >= 1:
+        return dataset
+    subset_size = max(1, int(round(len(dataset) * fraction)))
+    indices = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[
+        :subset_size
+    ].tolist()
+    return Subset(dataset, indices)
 
 
 def _evaluate_alignn(
@@ -235,6 +257,57 @@ def _evaluate_alignn(
                         }
                     )
     metrics = _regression_metrics(torch.cat(predictions), torch.cat(targets_all))
+    if return_predictions:
+        return metrics, rows
+    return metrics
+
+
+def _evaluate_multitask_target(
+    model: MultiTaskALIGNNModel,
+    target_name: str,
+    loader: DataLoader,
+    device: torch.device,
+    target_transform: _TargetTransform,
+    return_predictions: bool = False,
+) -> dict[str, float] | tuple[dict[str, float], list[dict[str, float | str]]]:
+    model.eval()
+    predictions: list[torch.Tensor] = []
+    standardized_predictions: list[torch.Tensor] = []
+    targets_all: list[torch.Tensor] = []
+    rows: list[dict[str, float | str]] = []
+    with torch.no_grad():
+        for graph_batch, line_graph_batch, targets, jids, _, _ in loader:
+            graph_batch = graph_batch.to(device)
+            line_graph_batch = line_graph_batch.to(device)
+            targets = targets.to(device)
+            batch_standardized = model(graph_batch, line_graph_batch, target_name)
+            batch_predictions = target_transform.inverse(batch_standardized)
+            predictions.append(batch_predictions.cpu())
+            standardized_predictions.append(batch_standardized.cpu())
+            targets_all.append(targets.cpu())
+            if return_predictions:
+                for jid, target, prediction in zip(
+                    jids,
+                    targets.detach().cpu().tolist(),
+                    batch_predictions.detach().cpu().tolist(),
+                ):
+                    rows.append(
+                        {
+                            "jid": str(jid),
+                            "target_name": target_name,
+                            "target": float(target),
+                            "prediction": float(prediction),
+                            "abs_error": abs(float(prediction) - float(target)),
+                        }
+                    )
+    targets_cat = torch.cat(targets_all)
+    metrics = _regression_metrics(torch.cat(predictions), targets_cat)
+    standardized_targets = target_transform.forward(targets_cat)
+    standardized_errors = torch.cat(standardized_predictions) - standardized_targets
+    metrics["standardized_mae"] = float(torch.mean(torch.abs(standardized_errors)).item())
+    metrics["standardized_rmse"] = float(
+        torch.sqrt(torch.mean(standardized_errors**2)).item()
+    )
     if return_predictions:
         return metrics, rows
     return metrics
@@ -462,6 +535,7 @@ def train_alignn_small_subset(
     train_split: str = "train",
     val_split: str = "val",
     test_split: str = "test",
+    train_fraction: float = 1.0,
     train_subset_size: int = 64,
     val_subset_size: int = 16,
     test_subset_size: int = 16,
@@ -487,6 +561,7 @@ def train_alignn_small_subset(
     prediction_min: float | None = None,
     selection_metric: str = "mae",
     readout: str = "mean",
+    pretrained_multitask_checkpoint: Path | None = None,
     run_name: str = "alignn_small_subset",
     device: str | None = None,
 ) -> None:
@@ -520,7 +595,10 @@ def train_alignn_small_subset(
         cutoff=cutoff,
         max_neighbors=max_neighbors,
     )
-    train_subset = _subset_or_full(train_dataset, train_subset_size)
+    train_subset = _subset_or_full(
+        _fraction_subset(train_dataset, train_fraction, seed),
+        train_subset_size,
+    )
     val_subset = _subset_or_full(val_dataset, val_subset_size)
     test_subset = _subset_or_full(test_dataset, test_subset_size)
     transform = _TargetTransform(
@@ -556,6 +634,34 @@ def train_alignn_small_subset(
         gcn_layers=gcn_layers,
         readout=readout,
     ).to(run_device)
+    if pretrained_multitask_checkpoint is not None:
+        checkpoint = torch.load(pretrained_multitask_checkpoint, map_location="cpu")
+        if "encoder_state_dict" in checkpoint:
+            checkpoint_state = {
+                f"encoder.{key}": value
+                for key, value in checkpoint["encoder_state_dict"].items()
+            }
+        else:
+            checkpoint_state = checkpoint.get("model_state_dict", checkpoint)
+        model_state = model.state_dict()
+        encoder_state = {
+            key: value
+            for key, value in checkpoint_state.items()
+            if key.startswith("encoder.")
+            and key in model_state
+            and tuple(model_state[key].shape) == tuple(value.shape)
+        }
+        if not encoder_state:
+            raise ValueError(
+                "No compatible encoder weights found in "
+                f"{pretrained_multitask_checkpoint}."
+            )
+        model_state.update(encoder_state)
+        model.load_state_dict(model_state)
+        print(
+            "Loaded multi-task encoder weights: "
+            f"{len(encoder_state)} tensors from {pretrained_multitask_checkpoint}."
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     if loss_name not in {"mse", "smoothl1", "l1"}:
         raise ValueError(f"Unsupported loss: {loss_name}")
@@ -687,6 +793,7 @@ def train_alignn_small_subset(
             "dataset_name": dataset_name,
             "target_column": target_column,
             "train_subset_size": len(train_subset),
+            "train_fraction": train_fraction,
             "val_subset_size": len(val_subset),
             "test_subset_size": len(test_subset),
             "seed": seed,
@@ -701,6 +808,9 @@ def train_alignn_small_subset(
             "scheduler": scheduler_name,
             "target_transform": target_transform,
             "readout": readout,
+            "pretrained_multitask_checkpoint": str(pretrained_multitask_checkpoint)
+            if pretrained_multitask_checkpoint is not None
+            else None,
             "positive_weight": positive_weight,
             "high_positive_weight": high_positive_weight,
             "high_target_threshold": high_target_threshold,
@@ -745,6 +855,43 @@ def train_alignn_small_subset(
         writer.writeheader()
         writer.writerows(test_rows)
 
+    metrics_path = logs_dir / f"{safe_run_name}_test_metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "target": target_column,
+                "dataset_name": dataset_name,
+                "seed": seed,
+                "train_fraction": train_fraction,
+                "sizes": {
+                    "train": len(train_subset),
+                    "val": len(val_subset),
+                    "test": len(test_subset),
+                },
+                "config": {
+                    "hidden_dim": hidden_dim,
+                    "alignn_layers": alignn_layers,
+                    "gcn_layers": gcn_layers,
+                    "loss": loss_name,
+                    "scheduler": scheduler_name,
+                    "target_transform": target_transform,
+                    "readout": readout,
+                    "pretrained_multitask_checkpoint": str(pretrained_multitask_checkpoint)
+                    if pretrained_multitask_checkpoint is not None
+                    else None,
+                },
+                "best_val_score": best_val_score,
+                "selection_metric": selection_metric,
+                "test_metrics": test_metrics,
+                "checkpoint": str(checkpoint_path),
+                "history": str(history_path),
+                "predictions": str(predictions_path),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
     print(
         "ALIGNN small-subset training finished: "
         f"best_val_{selection_metric}={best_val_score:.6f}, "
@@ -754,5 +901,437 @@ def train_alignn_small_subset(
         f"test_p95={test_metrics['p95_abs_error']:.6f}, "
         f"checkpoint={checkpoint_path}, "
         f"history={history_path}, "
-        f"predictions={predictions_path}."
+        f"predictions={predictions_path}, "
+        f"metrics={metrics_path}."
+    )
+
+
+def train_multitask_alignn(
+    project_root: Path,
+    targets: list[str],
+    dataset_name: str = "dft_3d",
+    train_split: str = "train",
+    val_split: str = "val",
+    test_split: str = "test",
+    train_fraction: float = 1.0,
+    train_subset_size: int = 0,
+    val_subset_size: int = 0,
+    test_subset_size: int = 0,
+    batch_size: int = 16,
+    hidden_dim: int = 64,
+    head_hidden_dim: int | None = None,
+    alignn_layers: int = 4,
+    gcn_layers: int = 4,
+    cutoff: float = 8.0,
+    max_neighbors: int = 12,
+    epochs: int = 10,
+    seed: int = 123,
+    learning_rate: float = 1e-3,
+    weight_decay: float = 1e-5,
+    loss_name: str = "smoothl1",
+    scheduler_name: str = "onecycle",
+    readout: str = "mean",
+    run_name: str = "multitask_alignn",
+    device: str | None = None,
+) -> None:
+    """Train a shared ALIGNN encoder with homogeneous target batches."""
+
+    project_root = project_root.resolve()
+    target_names = [target.strip() for target in targets if target.strip()]
+    if not target_names:
+        raise ValueError("At least one target is required for multi-task training.")
+    if loss_name not in {"mse", "smoothl1", "l1"}:
+        raise ValueError(f"Unsupported loss: {loss_name}")
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    run_device = _device_from_name(device)
+
+    train_loaders: dict[str, DataLoader] = {}
+    val_loaders: dict[str, DataLoader] = {}
+    test_loaders: dict[str, DataLoader] = {}
+    transforms: dict[str, _TargetTransform] = {}
+    sizes: dict[str, dict[str, int]] = {}
+
+    for target_index, target_name in enumerate(target_names):
+        train_dataset = TargetLabeledGraphDataset(
+            _make_alignn_dataset(
+                project_root=project_root,
+                split=train_split,
+                dataset_name=dataset_name,
+                target_column=target_name,
+                cutoff=cutoff,
+                max_neighbors=max_neighbors,
+            ),
+            target_name=target_name,
+            target_id=target_index,
+        )
+        val_dataset = TargetLabeledGraphDataset(
+            _make_alignn_dataset(
+                project_root=project_root,
+                split=val_split,
+                dataset_name=dataset_name,
+                target_column=target_name,
+                cutoff=cutoff,
+                max_neighbors=max_neighbors,
+            ),
+            target_name=target_name,
+            target_id=target_index,
+        )
+        test_dataset = TargetLabeledGraphDataset(
+            _make_alignn_dataset(
+                project_root=project_root,
+                split=test_split,
+                dataset_name=dataset_name,
+                target_column=target_name,
+                cutoff=cutoff,
+                max_neighbors=max_neighbors,
+            ),
+            target_name=target_name,
+            target_id=target_index,
+        )
+        train_subset = _subset_or_full(
+            _fraction_subset(train_dataset, train_fraction, seed + target_index),
+            train_subset_size,
+        )
+        val_subset = _subset_or_full(val_dataset, val_subset_size)
+        test_subset = _subset_or_full(test_dataset, test_subset_size)
+        transforms[target_name] = _TargetTransform(
+            name="standardize",
+            targets=_collect_targets(train_subset),
+        )
+        sizes[target_name] = {
+            "train": len(train_subset),
+            "val": len(val_subset),
+            "test": len(test_subset),
+        }
+        train_loaders[target_name] = DataLoader(
+            train_subset,
+            batch_size=min(batch_size, len(train_subset)),
+            shuffle=True,
+            generator=torch.Generator().manual_seed(seed + target_index),
+            collate_fn=collate_multitask_graph_samples_with_line_graph,
+        )
+        val_loaders[target_name] = DataLoader(
+            val_subset,
+            batch_size=min(batch_size, len(val_subset)),
+            shuffle=False,
+            drop_last=False,
+            collate_fn=collate_multitask_graph_samples_with_line_graph,
+        )
+        test_loaders[target_name] = DataLoader(
+            test_subset,
+            batch_size=min(batch_size, len(test_subset)),
+            shuffle=False,
+            drop_last=False,
+            collate_fn=collate_multitask_graph_samples_with_line_graph,
+        )
+
+    model = MultiTaskALIGNNModel(
+        target_names=target_names,
+        hidden_dim=hidden_dim,
+        alignn_layers=alignn_layers,
+        gcn_layers=gcn_layers,
+        readout=readout,
+        head_hidden_dim=head_hidden_dim,
+    ).to(run_device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    max_steps_per_epoch = max(len(loader) for loader in train_loaders.values())
+    scheduler = None
+    if scheduler_name == "onecycle":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=learning_rate,
+            epochs=epochs,
+            steps_per_epoch=max_steps_per_epoch * len(target_names),
+            pct_start=0.3,
+        )
+    elif scheduler_name != "none":
+        raise ValueError(f"Unsupported scheduler: {scheduler_name}")
+
+    history: list[dict[str, float | int | str]] = []
+    best_val_score = float("inf")
+    best_state: dict[str, torch.Tensor] | None = None
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        iterators = {target: iter(loader) for target, loader in train_loaders.items()}
+        train_loss_by_target: dict[str, list[float]] = {target: [] for target in target_names}
+        train_predictions: dict[str, list[torch.Tensor]] = {target: [] for target in target_names}
+        train_targets: dict[str, list[torch.Tensor]] = {target: [] for target in target_names}
+
+        for _ in range(max_steps_per_epoch):
+            for target_name in target_names:
+                try:
+                    graph_batch, line_graph_batch, targets_batch, _, _, _ = next(
+                        iterators[target_name]
+                    )
+                except StopIteration:
+                    iterators[target_name] = iter(train_loaders[target_name])
+                    graph_batch, line_graph_batch, targets_batch, _, _, _ = next(
+                        iterators[target_name]
+                    )
+
+                graph_batch = graph_batch.to(run_device)
+                line_graph_batch = line_graph_batch.to(run_device)
+                targets_batch = targets_batch.to(run_device)
+                predictions = model(graph_batch, line_graph_batch, target_name)
+                loss_targets = transforms[target_name].forward(targets_batch)
+                if loss_name == "mse":
+                    loss = torch.nn.functional.mse_loss(predictions, loss_targets)
+                elif loss_name == "smoothl1":
+                    loss = torch.nn.functional.smooth_l1_loss(predictions, loss_targets)
+                else:
+                    loss = torch.nn.functional.l1_loss(predictions, loss_targets)
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+
+                train_loss_by_target[target_name].append(float(loss.item()))
+                train_predictions[target_name].append(
+                    transforms[target_name].inverse(predictions).detach().cpu()
+                )
+                train_targets[target_name].append(targets_batch.detach().cpu())
+
+        val_metrics_by_target: dict[str, dict[str, float]] = {}
+        val_scores: list[float] = []
+        for target_name in target_names:
+            train_metrics = _regression_metrics(
+                torch.cat(train_predictions[target_name]),
+                torch.cat(train_targets[target_name]),
+            )
+            val_metrics = _evaluate_multitask_target(
+                model=model,
+                target_name=target_name,
+                loader=val_loaders[target_name],
+                device=run_device,
+                target_transform=transforms[target_name],
+            )
+            val_metrics_by_target[target_name] = val_metrics
+            val_scores.append(val_metrics["standardized_mae"])
+            history.append(
+                {
+                    "epoch": epoch,
+                    "target_name": target_name,
+                    "train_loss": sum(train_loss_by_target[target_name])
+                    / max(len(train_loss_by_target[target_name]), 1),
+                    "train_mae": train_metrics["mae"],
+                    "train_rmse": train_metrics["rmse"],
+                    "val_mae": val_metrics["mae"],
+                    "val_rmse": val_metrics["rmse"],
+                    "val_p95_abs_error": val_metrics["p95_abs_error"],
+                    "val_standardized_mae": val_metrics["standardized_mae"],
+                }
+            )
+
+        val_score = sum(val_scores) / max(len(val_scores), 1)
+        if val_score < best_val_score:
+            best_val_score = val_score
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+
+        val_summary = " ".join(
+            f"{target}:val_mae={val_metrics_by_target[target]['mae']:.6f}"
+            for target in target_names
+        )
+        print(
+            f"epoch={epoch:03d} avg_val_standardized_mae={val_score:.6f} "
+            f"{val_summary}"
+        )
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    checkpoints_dir = project_root / "results" / "checkpoints"
+    logs_dir = project_root / "results" / "logs"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    safe_run_name = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in run_name
+    ).strip("_") or "multitask_alignn"
+
+    test_metrics_by_target: dict[str, dict[str, float]] = {}
+    all_test_rows: list[dict[str, float | str]] = []
+    for target_name in target_names:
+        test_metrics, test_rows = _evaluate_multitask_target(
+            model=model,
+            target_name=target_name,
+            loader=test_loaders[target_name],
+            device=run_device,
+            target_transform=transforms[target_name],
+            return_predictions=True,
+        )
+        test_metrics_by_target[target_name] = test_metrics
+        all_test_rows.extend(test_rows)
+
+    best_epoch_by_target: dict[str, int] = {}
+    for target_name in target_names:
+        target_history = [row for row in history if row["target_name"] == target_name]
+        if target_history:
+            best_row = min(
+                target_history,
+                key=lambda row: float(row["val_standardized_mae"]),
+            )
+            best_epoch_by_target[target_name] = int(best_row["epoch"])
+
+    checkpoint_path = checkpoints_dir / f"{safe_run_name}.pt"
+    encoder_checkpoint_path = checkpoints_dir / f"{safe_run_name}_encoder.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "target_names": target_names,
+            "dataset_name": dataset_name,
+            "sizes": sizes,
+            "seed": seed,
+            "best_val_standardized_mae": best_val_score,
+            "hidden_dim": hidden_dim,
+            "head_hidden_dim": head_hidden_dim,
+            "alignn_layers": alignn_layers,
+            "gcn_layers": gcn_layers,
+            "loss": loss_name,
+            "scheduler": scheduler_name,
+            "readout": readout,
+            "target_transforms": {
+                target: {"mean": transforms[target].mean, "std": transforms[target].std}
+                for target in target_names
+            },
+            "best_epoch_by_target": best_epoch_by_target,
+            "test_metrics": test_metrics_by_target,
+        },
+        checkpoint_path,
+    )
+    torch.save(
+        {
+            "encoder_state_dict": model.encoder.state_dict(),
+            "target_names": target_names,
+            "dataset_name": dataset_name,
+            "hidden_dim": hidden_dim,
+            "alignn_layers": alignn_layers,
+            "gcn_layers": gcn_layers,
+            "readout": readout,
+            "target_transforms": {
+                target: {"mean": transforms[target].mean, "std": transforms[target].std}
+                for target in target_names
+            },
+        },
+        encoder_checkpoint_path,
+    )
+
+    history_path = logs_dir / f"{safe_run_name}_history.csv"
+    with history_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "epoch",
+                "target_name",
+                "train_loss",
+                "train_mae",
+                "train_rmse",
+                "val_mae",
+                "val_rmse",
+                "val_p95_abs_error",
+                "val_standardized_mae",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(history)
+
+    predictions_path = logs_dir / f"{safe_run_name}_test_predictions.csv"
+    with predictions_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["jid", "target_name", "target", "prediction", "abs_error"],
+        )
+        writer.writeheader()
+        writer.writerows(all_test_rows)
+
+    metrics_path = logs_dir / f"{safe_run_name}_test_metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "best_val_standardized_mae": best_val_score,
+                "targets": target_names,
+                "sizes": sizes,
+                "best_epoch_by_target": best_epoch_by_target,
+                "test_metrics": test_metrics_by_target,
+                "checkpoint": str(checkpoint_path),
+                "encoder_checkpoint": str(encoder_checkpoint_path),
+                "history": str(history_path),
+                "predictions": str(predictions_path),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    metric_summary = " ".join(
+        f"{target}:test_mae={test_metrics_by_target[target]['mae']:.6f}"
+        for target in target_names
+    )
+    print(
+        "Multi-task ALIGNN training finished: "
+        f"best_val_standardized_mae={best_val_score:.6f}, "
+        f"{metric_summary}, "
+        f"checkpoint={checkpoint_path}, "
+        f"encoder_checkpoint={encoder_checkpoint_path}, "
+        f"history={history_path}, "
+        f"predictions={predictions_path}, "
+        f"metrics={metrics_path}."
+    )
+
+
+def overfit_multitask_tiny_subset(
+    project_root: Path,
+    targets: list[str],
+    dataset_name: str = "dft_3d",
+    subset_size: int = 8,
+    batch_size: int = 2,
+    hidden_dim: int = 64,
+    head_hidden_dim: int | None = None,
+    alignn_layers: int = 4,
+    gcn_layers: int = 4,
+    cutoff: float = 8.0,
+    max_neighbors: int = 12,
+    epochs: int = 50,
+    seed: int = 123,
+    learning_rate: float = 1e-3,
+    weight_decay: float = 1e-5,
+    loss_name: str = "smoothl1",
+    scheduler_name: str = "none",
+    readout: str = "mean",
+    run_name: str = "multitask_tiny_overfit",
+    device: str | None = None,
+) -> None:
+    """Tiny multi-task overfit path for the plan's Phase 2 smoke criterion."""
+
+    train_multitask_alignn(
+        project_root=project_root,
+        targets=targets,
+        dataset_name=dataset_name,
+        train_subset_size=subset_size,
+        val_subset_size=subset_size,
+        test_subset_size=subset_size,
+        batch_size=batch_size,
+        hidden_dim=hidden_dim,
+        head_hidden_dim=head_hidden_dim,
+        alignn_layers=alignn_layers,
+        gcn_layers=gcn_layers,
+        cutoff=cutoff,
+        max_neighbors=max_neighbors,
+        epochs=epochs,
+        seed=seed,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        loss_name=loss_name,
+        scheduler_name=scheduler_name,
+        readout=readout,
+        run_name=run_name,
+        device=device,
     )
