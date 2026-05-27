@@ -116,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--val-subset-size", type=int, default=16)
     alignn_train.add_argument("--test-subset-size", type=int, default=16)
     alignn_train.add_argument("--batch-size", type=int, default=4)
+    alignn_train.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes. Use 0 for single-process loading.",
+    )
     alignn_train.add_argument("--hidden-dim", type=int, default=64)
     alignn_train.add_argument("--alignn-layers", type=int, default=4)
     alignn_train.add_argument("--gcn-layers", type=int, default=4)
@@ -192,6 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     multitask_train.add_argument("--val-subset-size", type=int, default=0)
     multitask_train.add_argument("--test-subset-size", type=int, default=0)
     multitask_train.add_argument("--batch-size", type=int, default=16)
+    multitask_train.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help=(
+            "Approximate DataLoader worker budget. Multi-task training splits "
+            "positive values across target loaders with at least one per target."
+        ),
+    )
     multitask_train.add_argument("--hidden-dim", type=int, default=64)
     multitask_train.add_argument("--head-hidden-dim", type=int, default=None)
     multitask_train.add_argument("--alignn-layers", type=int, default=4)
@@ -226,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     multitask_overfit.add_argument("--subset-size", type=int, default=8)
     multitask_overfit.add_argument("--batch-size", type=int, default=2)
+    multitask_overfit.add_argument("--num-workers", type=int, default=4)
     multitask_overfit.add_argument("--hidden-dim", type=int, default=64)
     multitask_overfit.add_argument("--head-hidden-dim", type=int, default=None)
     multitask_overfit.add_argument("--alignn-layers", type=int, default=4)
@@ -277,6 +293,7 @@ def main() -> None:
             target_column=args.target,
             split=args.split,
             batch_size=args.batch_size,
+            num_workers=args.num_workers,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             cutoff=args.cutoff,
@@ -293,6 +310,7 @@ def main() -> None:
             split=args.split,
             subset_size=args.subset_size,
             batch_size=args.batch_size,
+            num_workers=args.num_workers,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             cutoff=args.cutoff,
@@ -318,6 +336,7 @@ def main() -> None:
             target_column=args.target,
             split=args.split,
             batch_size=args.batch_size,
+            num_workers=args.num_workers,
             hidden_dim=args.hidden_dim,
             alignn_layers=args.alignn_layers,
             gcn_layers=args.gcn_layers,

@@ -27,6 +27,15 @@ def _device_from_name(device: str | None) -> torch.device:
     return torch.device("cpu")
 
 
+def _loader_options(num_workers: int, device: torch.device) -> dict[str, int | bool]:
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative.")
+    return {
+        "num_workers": num_workers,
+        "pin_memory": device.type == "cuda",
+    }
+
+
 def _make_baseline_dataset(
     project_root: Path,
     split: str,
@@ -564,12 +573,14 @@ def train_alignn_small_subset(
     pretrained_multitask_checkpoint: Path | None = None,
     run_name: str = "alignn_small_subset",
     device: str | None = None,
+    num_workers: int = 4,
 ) -> None:
     project_root = project_root.resolve()
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     run_device = _device_from_name(device)
+    loader_options = _loader_options(num_workers, run_device)
 
     train_dataset = _make_alignn_dataset(
         project_root=project_root,
@@ -612,6 +623,7 @@ def train_alignn_small_subset(
         shuffle=True,
         generator=torch.Generator().manual_seed(seed),
         collate_fn=collate_graph_samples_with_line_graph,
+        **loader_options,
     )
     val_loader = DataLoader(
         val_subset,
@@ -619,6 +631,7 @@ def train_alignn_small_subset(
         shuffle=False,
         drop_last=False,
         collate_fn=collate_graph_samples_with_line_graph,
+        **loader_options,
     )
     test_loader = DataLoader(
         test_subset,
@@ -626,6 +639,7 @@ def train_alignn_small_subset(
         shuffle=False,
         drop_last=False,
         collate_fn=collate_graph_samples_with_line_graph,
+        **loader_options,
     )
 
     model = ALIGNNModel(
@@ -933,6 +947,7 @@ def train_multitask_alignn(
     readout: str = "mean",
     run_name: str = "multitask_alignn",
     device: str | None = None,
+    num_workers: int = 4,
 ) -> None:
     """Train a shared ALIGNN encoder with homogeneous target batches."""
 
@@ -947,6 +962,10 @@ def train_multitask_alignn(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     run_device = _device_from_name(device)
+    loader_workers = _loader_options(num_workers, run_device)["num_workers"]
+    if loader_workers and len(target_names) > 1:
+        loader_workers = max(1, int(loader_workers) // len(target_names))
+    loader_options = _loader_options(int(loader_workers), run_device)
 
     train_loaders: dict[str, DataLoader] = {}
     val_loaders: dict[str, DataLoader] = {}
@@ -1012,6 +1031,7 @@ def train_multitask_alignn(
             shuffle=True,
             generator=torch.Generator().manual_seed(seed + target_index),
             collate_fn=collate_multitask_graph_samples_with_line_graph,
+            **loader_options,
         )
         val_loaders[target_name] = DataLoader(
             val_subset,
@@ -1019,6 +1039,7 @@ def train_multitask_alignn(
             shuffle=False,
             drop_last=False,
             collate_fn=collate_multitask_graph_samples_with_line_graph,
+            **loader_options,
         )
         test_loaders[target_name] = DataLoader(
             test_subset,
@@ -1026,6 +1047,7 @@ def train_multitask_alignn(
             shuffle=False,
             drop_last=False,
             collate_fn=collate_multitask_graph_samples_with_line_graph,
+            **loader_options,
         )
 
     model = MultiTaskALIGNNModel(
@@ -1308,6 +1330,7 @@ def overfit_multitask_tiny_subset(
     readout: str = "mean",
     run_name: str = "multitask_tiny_overfit",
     device: str | None = None,
+    num_workers: int = 4,
 ) -> None:
     """Tiny multi-task overfit path for the plan's Phase 2 smoke criterion."""
 
@@ -1334,4 +1357,5 @@ def overfit_multitask_tiny_subset(
         readout=readout,
         run_name=run_name,
         device=device,
+        num_workers=num_workers,
     )
