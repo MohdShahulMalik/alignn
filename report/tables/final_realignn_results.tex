@@ -1,9 +1,10 @@
 \begingroup
-\small
-\setlength{\tabcolsep}{4.5pt}
 
-\begin{center}
-\textbf{Main Test Metrics}\\[0.35em]
+\begin{table}[htbp]
+\centering
+\caption{Main test metrics for original baseline and ReALIGNN.}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
 \begin{tabular}{llrrrrrr}
 \toprule
 Target & Model & Orig. MAE & Our MAE & MAE Gain & Orig. RMSE & Our RMSE & RMSE Gain \\
@@ -16,12 +17,15 @@ Bulk modulus & Single & 14.7176 & 14.5057 & 1.4\% & 24.1459 & 24.5411 & -1.6\% \
 Bulk modulus & Ensemble & 14.7176 & 14.3275 & 2.7\% & 24.1459 & 23.8082 & 1.4\% \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
 \vspace{0.8em}
 
-\begin{center}
-\textbf{Tail Error and Per-Sample Wins}\\[0.35em]
+\begin{table}[htbp]
+\centering
+\caption{Tail error and per-sample wins.}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
 \begin{tabular}{llrrrr}
 \toprule
 Target & Model & Orig. P95 & Our P95 & P95 Gain & Wins/Losses \\
@@ -34,6 +38,6 @@ Bulk modulus & Single & 53.3365 & 46.4395 & 12.9\% & 515/485 \\
 Bulk modulus & Ensemble & 53.3365 & 44.9687 & 15.7\% & -- \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
 \endgroup
