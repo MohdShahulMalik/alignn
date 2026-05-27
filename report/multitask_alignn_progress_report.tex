@@ -1,0 +1,341 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{amsmath}
+
+\title{Progress Report: Multi-Task ALIGNN Representation Learning}
+\author{ALIGNN Reimplementation Project}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This report documents the recent shift from per-target ALIGNN training to a shared-encoder multi-task ALIGNN experiment.  The goal was to test whether supervised representation learning across thermodynamic, electronic, and mechanical targets improves data efficiency and downstream prediction quality compared with separately trained single-task models.
+
+The central hypothesis was:
+
+\begin{quote}
+A shared ALIGNN graph representation trained across multiple JARVIS targets learns transferable crystal features that improve low-data and target-specific performance.
+\end{quote}
+
+\section{Targets}
+
+The multi-task experiment used five JARVIS \texttt{dft\_3d} targets:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Target & Property type \\
+\midrule
+\texttt{formation\_energy\_peratom} & Thermodynamic stability energy \\
+\texttt{ehull} & Thermodynamic metastability measure \\
+\texttt{optb88vdw\_bandgap} & Electronic band gap \\
+\texttt{mbj\_bandgap} & Electronic band gap \\
+\texttt{bulk\_modulus\_kv} & Mechanical elastic property \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Model Change}
+
+The original training path used separate single-task ALIGNN models.  Even when the architecture was identical, each target had its own independently trained weights:
+
+\begin{verbatim}
+formation_energy_peratom -> ALIGNN encoder A -> one scalar
+ehull                    -> ALIGNN encoder B -> one scalar
+mbj_bandgap              -> ALIGNN encoder C -> one scalar
+bulk_modulus_kv          -> ALIGNN encoder D -> one scalar
+\end{verbatim}
+
+The new multi-task model uses one shared \texttt{ALIGNNGraphEncoder} and one prediction head per target:
+
+\begin{verbatim}
+                         -> formation_energy_peratom head
+                        -> ehull head
+graph + line graph -> shared ALIGNNGraphEncoder -> optb88vdw_bandgap head
+                        -> mbj_bandgap head
+                         -> bulk_modulus_kv head
+\end{verbatim}
+
+In this codebase, the shared encoder means the full \texttt{ALIGNNGraphEncoder} in \texttt{src/alignn/models/alignn\_model.py}.  It includes:
+
+\begin{itemize}
+  \item \texttt{CrystalFeatureEncoder}, which embeds atom, bond-distance, and angle features.
+  \item A stack of ALIGNN atom-graph and line-graph update layers.
+  \item A stack of edge-gated graph convolution layers.
+  \item Graph pooling to produce one crystal-level feature vector.
+\end{itemize}
+
+Thus the shared part is larger than only the atom or bond encoder.  It is the complete structure-representation block up to the pooled graph feature vector.  Each target-specific head maps that shared graph feature vector to one scalar property.
+
+\section{Implemented Work}
+
+The following implementation work was completed.
+
+\subsection{Shared-Encoder Model}
+
+Added \texttt{ALIGNNGraphEncoder} and \texttt{MultiTaskALIGNNModel} in \texttt{src/alignn/models/alignn\_model.py}.  The single-task \texttt{ALIGNNModel} was kept compatible by making it use the same \texttt{ALIGNNGraphEncoder} followed by a single linear readout.
+
+\subsection{Multi-Task Data Path}
+
+Added target-labeled graph samples and a multi-task collate path in \texttt{src/alignn/data/dataset.py}.  The first implementation uses homogeneous target batches: each batch contains samples for one target, while the training loop alternates across target loaders.
+
+\subsection{Training Logic}
+
+Added \texttt{train\_multitask\_alignn} in \texttt{src/alignn/train/trainer.py}.  The trainer now supports:
+
+\begin{itemize}
+  \item Per-target standardization for multi-task losses.
+  \item Homogeneous per-target data loaders.
+  \item Target-specific heads with a shared encoder.
+  \item Multi-task checkpoint saving.
+  \item Encoder checkpoint saving.
+  \item Single-task fine-tuning from a multi-task checkpoint.
+  \item Low-data train fractions for single-task and multi-task comparisons.
+  \item Test metrics export for analysis.
+\end{itemize}
+
+\subsection{CLI and Scripts}
+
+Added CLI commands and experiment scripts:
+
+\begin{itemize}
+  \item \texttt{alignn-train-multitask}
+  \item \texttt{alignn-overfit-multitask}
+  \item \texttt{--pretrained-multitask-checkpoint}
+  \item \texttt{--train-fraction}
+  \item \texttt{scripts/run\_multitask\_phase0\_baselines.sh}
+  \item \texttt{scripts/run\_multitask\_phase4\_joint.sh}
+  \item \texttt{scripts/run\_multitask\_phase5\_finetune.sh}
+  \item \texttt{scripts/run\_multitask\_phase6\_low\_data\_matrix.sh}
+  \item \texttt{scripts/run\_multitask\_phase7\_ablations.sh}
+  \item \texttt{scripts/analyze\_multitask\_results.py}
+\end{itemize}
+
+After the long run completed, a worker-control improvement was also added for future runs:
+
+\begin{itemize}
+  \item \texttt{--num-workers} for single-task training.
+  \item \texttt{--num-workers} for multi-task training.
+  \item CUDA data loaders now use pinned memory when appropriate.
+\end{itemize}
+
+This was verified locally with \texttt{uv run python -m compileall src} and CLI help checks for both training commands.
+
+\section{Validation Progress}
+
+Several smoke tests passed before launching the full matrix:
+
+\begin{itemize}
+  \item Source compiled successfully on the remote instance.
+  \item \texttt{alignn-train-multitask --help} worked through module invocation.
+  \item \texttt{alignn-overfit-multitask --help} worked.
+  \item A tiny multi-task smoke run completed and wrote checkpoint, encoder checkpoint, history, predictions, and metrics.
+  \item A tiny multi-task overfit run completed.
+  \item A tiny single-task fine-tune run loaded encoder weights from a multi-task checkpoint and completed.
+  \item The analysis script aggregated metrics into \texttt{results/tables/multitask\_metrics\_summary.csv}.
+\end{itemize}
+
+The remote console entrypoint became stale after a restart, so long jobs were launched with:
+
+\begin{verbatim}
+uv run python -m alignn.cli ...
+\end{verbatim}
+
+instead of the stale console-script path.
+
+\section{Completed Experiment Matrix}
+
+The completed Phase 6 low-data run used:
+
+\begin{itemize}
+  \item Seeds: \texttt{123}, \texttt{234}, \texttt{345}
+  \item Train fractions: \texttt{0.10}, \texttt{0.25}, \texttt{0.50}, \texttt{1.0}
+  \item Targets: five targets listed above
+  \item Epochs: \texttt{10}
+  \item Batch size: \texttt{16}
+  \item Hidden dimension: \texttt{64}
+  \item ALIGNN layers: \texttt{4}
+  \item GCN layers: \texttt{4}
+  \item Loss: \texttt{smoothl1}
+  \item Scheduler: \texttt{onecycle}
+\end{itemize}
+
+The final aggregation contained \texttt{195} Phase 6 metric rows:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Run type & Metric rows \\
+\midrule
+Scratch single-task & 60 \\
+Fine-tuned single-task & 60 \\
+Joint multi-task & 60 \\
+Full-data pretrain joint & 15 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Meaning of Compared Methods}
+
+\subsection{Scratch}
+
+\texttt{scratch} means a normal single-task ALIGNN model was initialized randomly and trained only on one target.
+
+\subsection{Joint}
+
+\texttt{joint} means one \texttt{MultiTaskALIGNNModel} was trained directly across all five targets.  The shared \texttt{ALIGNNGraphEncoder} received gradients from every target, while each target had its own prediction head.
+
+\subsection{Fine-Tune}
+
+\texttt{finetune} means two-stage training:
+
+\begin{enumerate}
+  \item Train a full-data multi-task model across all five targets.
+  \item Load that shared encoder into a normal single-task ALIGNN model.
+  \item Continue training on only one target and one train fraction.
+\end{enumerate}
+
+Fine-tuning therefore tests whether the multi-task encoder learned a transferable initialization for a target-specific model.
+
+\section{Phase 6 Results}
+
+The table below reports mean test MAE across the three seeds.  Lower is better.
+
+\begin{center}
+\small
+\begin{tabular}{clrrr}
+\toprule
+Fraction & Target & Scratch & Fine-tune & Joint \\
+\midrule
+0.10 & \texttt{bulk\_modulus\_kv} & 25.35 & \textbf{19.83} & 23.97 \\
+0.10 & \texttt{ehull} & 0.1050 & 0.1018 & \textbf{0.0963} \\
+0.10 & \texttt{formation\_energy\_peratom} & 0.3371 & \textbf{0.1980} & 0.3176 \\
+0.10 & \texttt{mbj\_bandgap} & 1.287 & \textbf{0.934} & 1.201 \\
+0.10 & \texttt{optb88vdw\_bandgap} & 0.4261 & 0.3930 & \textbf{0.3313} \\
+\midrule
+0.25 & \texttt{bulk\_modulus\_kv} & 21.64 & \textbf{18.33} & 20.49 \\
+0.25 & \texttt{ehull} & 0.0833 & 0.0823 & \textbf{0.0798} \\
+0.25 & \texttt{formation\_energy\_peratom} & 0.2651 & \textbf{0.1527} & 0.2453 \\
+0.25 & \texttt{mbj\_bandgap} & 1.162 & \textbf{0.830} & 1.119 \\
+0.25 & \texttt{optb88vdw\_bandgap} & 0.3454 & 0.3128 & \textbf{0.2862} \\
+\midrule
+0.50 & \texttt{bulk\_modulus\_kv} & 18.88 & \textbf{16.83} & 17.82 \\
+0.50 & \texttt{ehull} & 0.0711 & 0.0737 & \textbf{0.0691} \\
+0.50 & \texttt{formation\_energy\_peratom} & 0.1957 & \textbf{0.1316} & 0.1761 \\
+0.50 & \texttt{mbj\_bandgap} & 1.054 & \textbf{0.799} & 0.992 \\
+0.50 & \texttt{optb88vdw\_bandgap} & 0.3188 & 0.3033 & \textbf{0.2759} \\
+\midrule
+1.00 & \texttt{bulk\_modulus\_kv} & 16.83 & \textbf{16.02} & 16.65 \\
+1.00 & \texttt{ehull} & 0.0692 & 0.0705 & \textbf{0.0587} \\
+1.00 & \texttt{formation\_energy\_peratom} & 0.1353 & \textbf{0.1138} & 0.1389 \\
+1.00 & \texttt{mbj\_bandgap} & 0.975 & \textbf{0.756} & 0.862 \\
+1.00 & \texttt{optb88vdw\_bandgap} & 0.2900 & 0.2764 & \textbf{0.2618} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Observed Improvements}
+
+\subsection{Fine-Tuning Improvements}
+
+Fine-tuning from the multi-task encoder was the strongest overall strategy.  Compared with scratch single-task training, the average percent MAE changes across fractions and seeds were:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Target & Mean MAE improvement & Win rate vs scratch \\
+\midrule
+\texttt{formation\_energy\_peratom} & 33.0\% & 100\% \\
+\texttt{mbj\_bandgap} & 25.7\% & 100\% \\
+\texttt{bulk\_modulus\_kv} & 13.2\% & 100\% \\
+\texttt{optb88vdw\_bandgap} & 6.7\% & 100\% \\
+\texttt{ehull} & -0.4\% & 50\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The largest low-data gains were:
+
+\begin{itemize}
+  \item \texttt{formation\_energy\_peratom} at 10\% data: MAE improved from \texttt{0.3371} to \texttt{0.1980}, about \texttt{41\%} better.
+  \item \texttt{mbj\_bandgap} at 10\% data: MAE improved from \texttt{1.287} to \texttt{0.934}, about \texttt{27\%} better.
+  \item \texttt{bulk\_modulus\_kv} at 10\% data: MAE improved from \texttt{25.35} to \texttt{19.83}, about \texttt{22\%} better.
+\end{itemize}
+
+\subsection{Joint Multi-Task Improvements}
+
+Joint multi-task training also improved over scratch in most cells, but its gains were smaller and more target-dependent.  Average improvements over scratch were:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Target & Mean MAE improvement & Win rate vs scratch \\
+\midrule
+\texttt{optb88vdw\_bandgap} & 15.6\% & 100\% \\
+\texttt{ehull} & 7.1\% & 75\% \\
+\texttt{mbj\_bandgap} & 6.7\% & 92\% \\
+\texttt{formation\_energy\_peratom} & 5.1\% & 83\% \\
+\texttt{bulk\_modulus\_kv} & 4.3\% & 67\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Interpretation}
+
+The results support the main hypothesis: multi-task supervised representation learning produced useful transferable features.  Scratch training was not the best mean method for any target/fraction cell.
+
+The best strategy depends on the target:
+
+\begin{itemize}
+  \item Use multi-task pretraining plus single-task fine-tuning for \texttt{formation\_energy\_peratom}, \texttt{mbj\_bandgap}, and \texttt{bulk\_modulus\_kv}.
+  \item Use direct joint multi-task prediction for \texttt{ehull} and \texttt{optb88vdw\_bandgap}.
+\end{itemize}
+
+This suggests that some properties benefit most from a shared representation followed by target-specific specialization, while others benefit from remaining inside the jointly trained model.
+
+\section{Caveats}
+
+The current conclusions should be treated as directional rather than final production-quality results:
+
+\begin{itemize}
+  \item All Phase 6 runs used a short \texttt{10}-epoch budget.
+  \item Fine-tuning used a full-data multi-task pretrain checkpoint, so it had representation exposure beyond the target-specific low-data subset.
+  \item The experiment measured held-out MAE and RMSE, but further per-sample error analysis would help identify transfer and negative-transfer regimes.
+  \item The remote console script became stale after restart; module invocation was used to avoid that environment issue.
+\end{itemize}
+
+\section{Next Steps}
+
+Recommended next steps are:
+
+\begin{enumerate}
+  \item Run longer budgets for the best method per target.
+  \item Compare fine-tuning against stronger tuned single-task baselines, not only short-budget scratch runs.
+  \item Add target-group ablations, especially thermodynamic-only and electronic-only groups.
+  \item Analyze per-sample wins and losses to identify which crystal families benefit from transfer.
+  \item Preserve the \texttt{--num-workers} setting in future remote launches to improve data-loading throughput.
+\end{enumerate}
+
+\section{Artifact Locations}
+
+Important artifacts are:
+
+\begin{itemize}
+  \item Plan: \texttt{MULTITASK\_ALIGNN\_PLAN.md}
+  \item Aggregated metrics: \texttt{results/tables/multitask\_metrics\_summary.csv}
+  \item Target correlations: \texttt{results/tables/multitask\_target\_correlations.csv}
+  \item Phase 6 log: \texttt{results/logs/rest\_phase6\_allseeds\_pipeline.log}
+  \item Post-run analysis log: \texttt{results/logs/rest\_phase6\_post\_analysis.log}
+  \item Model code: \texttt{src/alignn/models/alignn\_model.py}
+  \item Training code: \texttt{src/alignn/train/trainer.py}
+  \item CLI code: \texttt{src/alignn/cli.py}
+\end{itemize}
+
+\end{document}
