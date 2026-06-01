@@ -233,6 +233,7 @@ def _evaluate_alignn(
     device: torch.device,
     target_transform: _TargetTransform | None = None,
     prediction_min: float | None = None,
+    use_amp: bool = False,
     return_predictions: bool = False,
 ) -> dict[str, float] | tuple[dict[str, float], list[dict[str, float | str]]]:
     model.eval()
@@ -244,7 +245,8 @@ def _evaluate_alignn(
             graph_batch = graph_batch.to(device)
             line_graph_batch = line_graph_batch.to(device)
             targets = targets.to(device)
-            batch_predictions = model(graph_batch, line_graph_batch)
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                batch_predictions = model(graph_batch, line_graph_batch)
             if target_transform is not None:
                 batch_predictions = target_transform.inverse(batch_predictions)
             if prediction_min is not None:
@@ -570,6 +572,12 @@ def train_alignn_small_subset(
     prediction_min: float | None = None,
     selection_metric: str = "mae",
     readout: str = "mean",
+    energy_mult_natoms: bool = False,
+    penalty_factor: float = 0.0,
+    penalty_threshold: float = 1.0,
+    use_amp: bool = False,
+    use_cudnn_benchmark: bool = False,
+    torch_compile: bool = False,
     pretrained_multitask_checkpoint: Path | None = None,
     run_name: str = "alignn_small_subset",
     device: str | None = None,
@@ -579,6 +587,8 @@ def train_alignn_small_subset(
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if use_cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
     run_device = _device_from_name(device)
     loader_options = _loader_options(num_workers, run_device)
 
@@ -616,6 +626,11 @@ def train_alignn_small_subset(
         name=target_transform,
         targets=_collect_targets(train_subset),
     )
+    if transform.name != "none" and (energy_mult_natoms or penalty_factor > 0):
+        raise ValueError(
+            "Graphwise prediction scaling/penalties are only supported with "
+            "--target-transform none."
+        )
 
     train_loader = DataLoader(
         train_subset,
@@ -647,7 +662,12 @@ def train_alignn_small_subset(
         alignn_layers=alignn_layers,
         gcn_layers=gcn_layers,
         readout=readout,
+        energy_mult_natoms=energy_mult_natoms,
+        penalty_factor=penalty_factor,
+        penalty_threshold=penalty_threshold,
     ).to(run_device)
+    if torch_compile:
+        model = torch.compile(model)
     if pretrained_multitask_checkpoint is not None:
         checkpoint = torch.load(pretrained_multitask_checkpoint, map_location="cpu")
         if "encoder_state_dict" in checkpoint:
@@ -710,9 +730,10 @@ def train_alignn_small_subset(
             line_graph_batch = line_graph_batch.to(run_device)
             targets = targets.to(run_device)
 
-            predictions = model(graph_batch, line_graph_batch)
-            loss_targets = transform.forward(targets)
-            loss = _weighted_regression_loss(
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                predictions = model(graph_batch, line_graph_batch)
+                loss_targets = transform.forward(targets)
+                loss = _weighted_regression_loss(
                 predictions=predictions,
                 targets=loss_targets,
                 weight_targets=targets,
@@ -748,6 +769,7 @@ def train_alignn_small_subset(
             run_device,
             target_transform=transform,
             prediction_min=prediction_min,
+            use_amp=use_amp,
         )
         mean_loss = sum(train_losses) / max(len(train_losses), 1)
         history.append(
@@ -799,6 +821,7 @@ def train_alignn_small_subset(
         run_device,
         target_transform=transform,
         prediction_min=prediction_min,
+        use_amp=use_amp,
         return_predictions=True,
     )
     torch.save(
@@ -831,6 +854,9 @@ def train_alignn_small_subset(
             "low_target_weight": low_target_weight,
             "low_target_threshold": low_target_threshold,
             "mse_tail_weight": mse_tail_weight,
+            "energy_mult_natoms": energy_mult_natoms,
+            "penalty_factor": penalty_factor,
+            "penalty_threshold": penalty_threshold,
             "prediction_min": prediction_min,
             "test_nonnegative_mae": test_metrics["nonnegative_mae"],
             "test_high_positive_mae": test_metrics["high_positive_mae"],
@@ -890,6 +916,9 @@ def train_alignn_small_subset(
                     "scheduler": scheduler_name,
                     "target_transform": target_transform,
                     "readout": readout,
+                    "energy_mult_natoms": energy_mult_natoms,
+                    "penalty_factor": penalty_factor,
+                    "penalty_threshold": penalty_threshold,
                     "pretrained_multitask_checkpoint": str(pretrained_multitask_checkpoint)
                     if pretrained_multitask_checkpoint is not None
                     else None,
