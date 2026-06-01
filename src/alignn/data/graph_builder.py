@@ -148,7 +148,7 @@ def _canonical_undirected_edges(
             distance = float(np.linalg.norm(r))
             canonical_edges.append(NeighborEdge(src, dst, distance, r, image))
             canonical_edges.append(
-                NeighborEdge(dst, src, distance, -r, tuple(-np.asarray(image, dtype=int)))
+                NeighborEdge(dst, src, distance, -r, image)
             )
     return canonical_edges
 
