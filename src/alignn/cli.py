@@ -126,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--alignn-layers", type=int, default=4)
     alignn_train.add_argument("--gcn-layers", type=int, default=4)
     alignn_train.add_argument("--cutoff", type=float, default=8.0)
+    alignn_train.add_argument(
+        "--cutoff-extra",
+        type=float,
+        default=0.0,
+        help="Additional radius added to cutoff for neighbor search (mimics original ALIGNN cutoff_extra).",
+    )
     alignn_train.add_argument("--max-neighbors", type=int, default=12)
     alignn_train.add_argument("--epochs", type=int, default=10)
     alignn_train.add_argument("--seed", type=int, default=123)
@@ -162,6 +168,38 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Optional lower bound applied to predictions for metrics and exported predictions.",
+    )
+    alignn_train.add_argument(
+        "--energy-mult-natoms",
+        action="store_true",
+        help="Multiply model output by number of atoms inside the model forward pass.",
+    )
+    alignn_train.add_argument(
+        "--penalty-factor",
+        type=float,
+        default=0.0,
+        help="Short-bond penalty factor applied inside model forward pass.",
+    )
+    alignn_train.add_argument(
+        "--penalty-threshold",
+        type=float,
+        default=1.0,
+        help="Distance threshold for --penalty-factor.",
+    )
+    alignn_train.add_argument(
+        "--use-amp",
+        action="store_true",
+        help="Use automatic mixed precision (float16) for faster training.",
+    )
+    alignn_train.add_argument(
+        "--use-cudnn-benchmark",
+        action="store_true",
+        help="Enable cudnn.benchmark for faster convolutions on fixed-size inputs.",
+    )
+    alignn_train.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help="Use torch.compile for fused kernels (requires PyTorch 2.0+).",
     )
     alignn_train.add_argument(
         "--run-name",
@@ -293,7 +331,6 @@ def main() -> None:
             target_column=args.target,
             split=args.split,
             batch_size=args.batch_size,
-            num_workers=args.num_workers,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             cutoff=args.cutoff,
@@ -310,7 +347,6 @@ def main() -> None:
             split=args.split,
             subset_size=args.subset_size,
             batch_size=args.batch_size,
-            num_workers=args.num_workers,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             cutoff=args.cutoff,
@@ -324,24 +360,21 @@ def main() -> None:
             target_transform=args.target_transform,
             positive_weight=args.positive_weight,
             high_positive_weight=args.high_positive_weight,
+            high_target_threshold=args.high_target_threshold,
+            low_target_weight=args.low_target_weight,
+            low_target_threshold=args.low_target_threshold,
             mse_tail_weight=args.mse_tail_weight,
-            device=args.device,
-        )
-    elif args.command == "alignn-forward":
-        from alignn.train.trainer import run_alignn_forward_pass
-
-        run_alignn_forward_pass(
-            project_root=args.project_root,
-            dataset_name=args.dataset,
-            target_column=args.target,
-            split=args.split,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            hidden_dim=args.hidden_dim,
-            alignn_layers=args.alignn_layers,
-            gcn_layers=args.gcn_layers,
-            cutoff=args.cutoff,
-            max_neighbors=args.max_neighbors,
+            prediction_min=args.prediction_min,
+            selection_metric=args.selection_metric,
+            readout=args.readout,
+            energy_mult_natoms=args.energy_mult_natoms,
+            penalty_factor=args.penalty_factor,
+            penalty_threshold=args.penalty_threshold,
+            use_amp=args.use_amp,
+            use_cudnn_benchmark=args.use_cudnn_benchmark,
+            torch_compile=args.torch_compile,
+            pretrained_multitask_checkpoint=args.pretrained_multitask_checkpoint,
+            run_name=args.run_name,
             device=args.device,
         )
     elif args.command == "alignn-train-small":
@@ -380,6 +413,12 @@ def main() -> None:
             prediction_min=args.prediction_min,
             selection_metric=args.selection_metric,
             readout=args.readout,
+            energy_mult_natoms=args.energy_mult_natoms,
+            penalty_factor=args.penalty_factor,
+            penalty_threshold=args.penalty_threshold,
+            use_amp=args.use_amp,
+            use_cudnn_benchmark=args.use_cudnn_benchmark,
+            torch_compile=args.torch_compile,
             pretrained_multitask_checkpoint=args.pretrained_multitask_checkpoint,
             run_name=args.run_name,
             device=args.device,
