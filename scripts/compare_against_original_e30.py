@@ -77,6 +77,12 @@ def main() -> None:
     )
     parser.add_argument("--logs-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--comparison-label",
+        type=str,
+        default="e30",
+        help="Label prefix for generated output filenames.",
+    )
     args = parser.parse_args()
 
     project_root = args.project_root.resolve()
@@ -95,7 +101,10 @@ def main() -> None:
     original = original[
         ["target", "original_mae", "original_rmse", "original_p95_abs_error"]
     ]
-    original.to_csv(output_dir / "original_alignn_e30_metrics_summary_frozen.csv", index=False)
+    original.to_csv(
+        output_dir / f"original_alignn_{args.comparison_label}_metrics_summary_frozen.csv",
+        index=False,
+    )
 
     metrics = pd.DataFrame(_metric_rows(logs_dir))
     metrics = metrics[metrics["target"].isin(TARGETS)].dropna(subset=["mae"])
@@ -107,7 +116,7 @@ def main() -> None:
     metrics["rmse_delta_vs_original"] = metrics["rmse"] - metrics["original_rmse"]
 
     metrics.sort_values(["target", "mae", "rmse"]).to_csv(
-        output_dir / "e30_original_vs_all_reimplementation_runs.csv",
+        output_dir / f"{args.comparison_label}_original_vs_all_reimplementation_runs.csv",
         index=False,
     )
 
@@ -119,12 +128,16 @@ def main() -> None:
     best_scratch["selection"] = "best_scratch_like"
     summary = pd.concat([best_overall, best_scratch], ignore_index=True)
     summary.sort_values(["target", "selection"]).to_csv(
-        output_dir / "e30_original_vs_best_reimplementation_summary.csv",
+        output_dir / f"{args.comparison_label}_original_vs_best_reimplementation_summary.csv",
         index=False,
     )
 
-    print(f"all_runs={output_dir / 'e30_original_vs_all_reimplementation_runs.csv'}")
-    print(f"summary={output_dir / 'e30_original_vs_best_reimplementation_summary.csv'}")
+    print(
+        f"all_runs={output_dir / f'{args.comparison_label}_original_vs_all_reimplementation_runs.csv'}"
+    )
+    print(
+        f"summary={output_dir / f'{args.comparison_label}_original_vs_best_reimplementation_summary.csv'}"
+    )
     print(
         summary[
             [

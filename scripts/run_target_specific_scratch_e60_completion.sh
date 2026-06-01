@@ -9,10 +9,15 @@ ALIGNN_LAYERS="${ALIGNN_LAYERS:-4}"
 GCN_LAYERS="${GCN_LAYERS:-4}"
 LR="${LR:-0.001}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.00001}"
+START_AT="${START_AT:-}"
+seen_start="false"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+
+VENV_SITE_PACKAGES="${VENV_SITE_PACKAGES:-$HOME/projects/alignn/.venv/lib/python3.11/site-packages}"
+export LD_LIBRARY_PATH="${VENV_SITE_PACKAGES}/nvidia/cuda_nvrtc/lib:${VENV_SITE_PACKAGES}/nvidia/cuda_runtime/lib:/opt/pytorch/cuda/lib:${LD_LIBRARY_PATH:-}"
 
 common=(
     --dataset dft_3d
@@ -31,6 +36,26 @@ common=(
 )
 
 run_small() {
+    local args=("$@")
+    local run_name=""
+    local i=0
+    while [[ $i -lt ${#args[@]} ]]; do
+        if [[ "${args[$i]}" == "--run-name" ]] && [[ $((i + 1)) -lt ${#args[@]} ]]; then
+            run_name="${args[$((i + 1))]}"
+            break
+        fi
+        i=$((i + 1))
+    done
+
+    if [[ -n "${START_AT}" && "${seen_start}" != "true" ]]; then
+        if [[ "${run_name}" == "${START_AT}" ]]; then
+            seen_start="true"
+        else
+            echo "[skip] ${run_name:-unknown_run} before START_AT=${START_AT} $(date -Is)"
+            return
+        fi
+    fi
+
     echo "[start] $* $(date -Is)"
     uv run python -m alignn.cli alignn-train-small "$@"
     echo "[done] $* $(date -Is)"

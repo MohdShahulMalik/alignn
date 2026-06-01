@@ -24,3 +24,21 @@ results/tables/*
 !results/logs/baseline_tiny_overfit_history.csv
 !results/tables/dft_3d_formation_energy_peratom_inspection.json
 .env
+report/Certificate Maxum.pdf
+report/Complete Report.pdf
+report/Front Page Maxum.pdf
+report/LearnLore_Project_Presentation.pptx
+report/LearnLore_Software_Development_Presentation.pptx
+report/PPT Front page.ppt
+report/ReALIGNN_Project_Presentation.pptx
+report/Sound_Separation_Project_Presentation.pptx
+report/declaration.pdf
+report/final najor project.pdf
+report/partial_report.pdf
+report/realignn_project_report.pdf
+report/realignn_project_report.tex
+report/report_realignn.pdf
+report/report_with_cert.pdf
+report/report_with_cert_dec.pdf
+report/report_with_cert_up.pdf
+report/universal_sound_separation_presentation.pptx
