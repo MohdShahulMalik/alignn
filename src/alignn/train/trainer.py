@@ -582,6 +582,7 @@ def train_alignn_small_subset(
     run_name: str = "alignn_small_subset",
     device: str | None = None,
     num_workers: int = 4,
+    keep_data_order: bool = False,
 ) -> None:
     project_root = project_root.resolve()
     torch.manual_seed(seed)
@@ -635,7 +636,7 @@ def train_alignn_small_subset(
     train_loader = DataLoader(
         train_subset,
         batch_size=min(batch_size, len(train_subset)),
-        shuffle=True,
+        shuffle=not keep_data_order,
         generator=torch.Generator().manual_seed(seed),
         collate_fn=collate_graph_samples_with_line_graph,
         **loader_options,

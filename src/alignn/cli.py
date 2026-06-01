@@ -133,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Additional radius added to cutoff for neighbor search (mimics original ALIGNN cutoff_extra).",
     )
     alignn_train.add_argument("--max-neighbors", type=int, default=12)
+    alignn_train.add_argument(
+        "--keep-data-order",
+        action="store_true",
+        help="Keep original data ordering instead of shuffling (original uses this for bulk_modulus_kv).",
+    )
     alignn_train.add_argument("--epochs", type=int, default=10)
     alignn_train.add_argument("--seed", type=int, default=123)
     alignn_train.add_argument("--learning-rate", type=float, default=1e-3)
@@ -420,6 +425,7 @@ def main() -> None:
             use_cudnn_benchmark=args.use_cudnn_benchmark,
             torch_compile=args.torch_compile,
             pretrained_multitask_checkpoint=args.pretrained_multitask_checkpoint,
+            keep_data_order=args.keep_data_order,
             run_name=args.run_name,
             device=args.device,
         )
