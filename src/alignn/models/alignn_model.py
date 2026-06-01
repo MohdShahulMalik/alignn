@@ -103,6 +103,9 @@ class ALIGNNModel(nn.Module):
         bond_rbf_bins: int = 80,
         angle_rbf_bins: int = 40,
         readout: str = "mean",
+        energy_mult_natoms: bool = False,
+        penalty_factor: float = 0.0,
+        penalty_threshold: float = 1.0,
     ) -> None:
         super().__init__()
         self.encoder = ALIGNNGraphEncoder(
@@ -115,13 +118,31 @@ class ALIGNNModel(nn.Module):
             readout=readout,
         )
         self.readout = nn.Linear(self.encoder.output_dim, 1)
+        self.energy_mult_natoms = energy_mult_natoms
+        self.penalty_factor = penalty_factor
+        self.penalty_threshold = penalty_threshold
 
     def encode_graph(self, g: dgl.DGLGraph, lg: dgl.DGLGraph) -> torch.Tensor:
         return self.encoder(g, lg)
 
     def forward(self, g: dgl.DGLGraph, lg: dgl.DGLGraph) -> torch.Tensor:
         graph_feats = self.encode_graph(g, lg)
-        return self.readout(graph_feats).squeeze(-1)
+        out = self.readout(graph_feats).squeeze(-1)
+        if self.energy_mult_natoms:
+            num_atoms = g.batch_num_nodes().to(out.device).float()
+            out = out * num_atoms
+        if self.penalty_factor > 0:
+            distances = g.edata["d"].reshape(-1).to(out.device)
+            edge_penalties = self.penalty_factor * (
+                self.penalty_threshold - distances
+            ).clamp_min(0)
+            batch_sizes = g.batch_num_edges().tolist()
+            penalties = [
+                penalty.sum()
+                for penalty in torch.split(edge_penalties, batch_sizes)
+            ]
+            out = out + torch.stack(penalties).to(out.device)
+        return out
 
 
 class MultiTaskALIGNNModel(nn.Module):
