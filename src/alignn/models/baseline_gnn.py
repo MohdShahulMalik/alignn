@@ -12,7 +12,7 @@ from alignn.data.features import CrystalFeatureEncoder
 class EdgeGatedGraphConv(nn.Module):
     """Original ALIGNN-style normalized edge-gated graph convolution."""
 
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(self, hidden_dim: int, dropout: float = 0.0) -> None:
         super().__init__()
         self.src_gate = nn.Linear(hidden_dim, hidden_dim)
         self.dst_gate = nn.Linear(hidden_dim, hidden_dim)
@@ -21,6 +21,8 @@ class EdgeGatedGraphConv(nn.Module):
         self.dst_update = nn.Linear(hidden_dim, hidden_dim)
         self.node_norm = nn.BatchNorm1d(hidden_dim)
         self.edge_norm = nn.BatchNorm1d(hidden_dim)
+        self.node_drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.edge_drop = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(
         self,
@@ -44,8 +46,8 @@ class EdgeGatedGraphConv(nn.Module):
             aggregate = g.ndata["sum_sigma_h"] / (g.ndata["sum_sigma"] + 1e-6)
 
             node_delta = self.src_update(node_feats) + aggregate
-            node_out = node_feats + F.silu(self.node_norm(node_delta))
-            edge_out = edge_feats + F.silu(self.edge_norm(edge_update))
+            node_out = self.node_drop(node_feats + F.silu(self.node_norm(node_delta)))
+            edge_out = self.edge_drop(edge_feats + F.silu(self.edge_norm(edge_update)))
 
         return node_out, edge_out
 

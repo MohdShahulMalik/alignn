@@ -15,10 +15,10 @@ class ALIGNNLayer(nn.Module):
     graph edges carry angle features between adjacent bonds.
     """
 
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(self, hidden_dim: int, dropout: float = 0.0) -> None:
         super().__init__()
-        self.atom_graph_update = EdgeGatedGraphConv(hidden_dim=hidden_dim)
-        self.line_graph_update = EdgeGatedGraphConv(hidden_dim=hidden_dim)
+        self.atom_graph_update = EdgeGatedGraphConv(hidden_dim=hidden_dim, dropout=dropout)
+        self.line_graph_update = EdgeGatedGraphConv(hidden_dim=hidden_dim, dropout=dropout)
 
     def forward(
         self,
@@ -45,6 +45,7 @@ class ALIGNNGraphEncoder(nn.Module):
         bond_rbf_bins: int = 80,
         angle_rbf_bins: int = 40,
         readout: str = "mean",
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if readout not in {"mean", "meanmax"}:
@@ -57,10 +58,10 @@ class ALIGNNGraphEncoder(nn.Module):
             embedding_dim=hidden_dim,
         )
         self.alignn_layers = nn.ModuleList(
-            [ALIGNNLayer(hidden_dim=hidden_dim) for _ in range(alignn_layers)]
+            [ALIGNNLayer(hidden_dim=hidden_dim, dropout=dropout) for _ in range(alignn_layers)]
         )
         self.gcn_layers = nn.ModuleList(
-            [EdgeGatedGraphConv(hidden_dim=hidden_dim) for _ in range(gcn_layers)]
+            [EdgeGatedGraphConv(hidden_dim=hidden_dim, dropout=dropout) for _ in range(gcn_layers)]
         )
         readout_dim = hidden_dim * 2 if readout == "meanmax" else hidden_dim
         self.output_dim = readout_dim
@@ -106,6 +107,7 @@ class ALIGNNModel(nn.Module):
         energy_mult_natoms: bool = False,
         penalty_factor: float = 0.0,
         penalty_threshold: float = 1.0,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.encoder = ALIGNNGraphEncoder(
@@ -116,6 +118,7 @@ class ALIGNNModel(nn.Module):
             bond_rbf_bins=bond_rbf_bins,
             angle_rbf_bins=angle_rbf_bins,
             readout=readout,
+            dropout=dropout,
         )
         self.readout = nn.Linear(self.encoder.output_dim, 1)
         self.energy_mult_natoms = energy_mult_natoms
@@ -143,6 +146,54 @@ class ALIGNNModel(nn.Module):
             ]
             out = out + torch.stack(penalties).to(out.device)
         return out
+
+
+class ZeroInflatedALIGNNModel(nn.Module):
+    """ALIGNN encoder with a binary classifier head for zero-inflated regression.
+
+    For targets like mbj_bandgap where most values are exactly zero, the classifier
+    learns P(target > 0) and the regression head predicts the nonzero value.
+    Final prediction: regression_pred * sigmoid(classifier_logit) — soft gating
+    so even misclassified zeros are suppressed by low probability.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 64,
+        alignn_layers: int = 4,
+        gcn_layers: int = 4,
+        num_elements: int = 100,
+        bond_rbf_bins: int = 80,
+        angle_rbf_bins: int = 40,
+        readout: str = "mean",
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.encoder = ALIGNNGraphEncoder(
+            hidden_dim=hidden_dim,
+            alignn_layers=alignn_layers,
+            gcn_layers=gcn_layers,
+            num_elements=num_elements,
+            bond_rbf_bins=bond_rbf_bins,
+            angle_rbf_bins=angle_rbf_bins,
+            readout=readout,
+            dropout=dropout,
+        )
+        self.regression_head = nn.Linear(self.encoder.output_dim, 1)
+        self.classifier_head = nn.Linear(self.encoder.output_dim, 1)
+
+    def forward(self, g: dgl.DGLGraph, lg: dgl.DGLGraph) -> tuple[torch.Tensor, torch.Tensor]:
+        graph_feats = self.encoder(g, lg)
+        regression_pred = self.regression_head(graph_feats).squeeze(-1)
+        classifier_logit = self.classifier_head(graph_feats).squeeze(-1)
+        return regression_pred, classifier_logit
+
+    @torch.no_grad()
+    def predict(self, g: dgl.DGLGraph, lg: dgl.DGLGraph) -> torch.Tensor:
+        """Inference: soft-gate regression output by classifier probability."""
+        regression_pred, classifier_logit = self.forward(g, lg)
+        prob = torch.sigmoid(classifier_logit)
+        return regression_pred.clamp_min(0) * prob
 
 
 class MultiTaskALIGNNModel(nn.Module):
