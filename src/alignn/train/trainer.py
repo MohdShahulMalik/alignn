@@ -4,9 +4,10 @@ import csv
 import json
 from pathlib import Path
 
+import math
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 
 from alignn.data.dataset import (
     JarvisGraphDataset,
@@ -15,7 +16,7 @@ from alignn.data.dataset import (
     collate_graph_samples_with_line_graph,
     collate_multitask_graph_samples_with_line_graph,
 )
-from alignn.models.alignn_model import ALIGNNModel, MultiTaskALIGNNModel
+from alignn.models.alignn_model import ALIGNNModel, MultiTaskALIGNNModel, ZeroInflatedALIGNNModel
 from alignn.models.baseline_gnn import BaselineGNN
 
 
@@ -34,6 +35,27 @@ def _loader_options(num_workers: int, device: torch.device) -> dict[str, int | b
         "num_workers": num_workers,
         "pin_memory": device.type == "cuda",
     }
+
+
+def _adamw_params(
+    model: nn.Module,
+    use_group_decay: bool,
+):
+    if not use_group_decay:
+        return model.parameters()
+    decay: list[nn.Parameter] = []
+    no_decay: list[nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "bias" in name or "bn" in name or "norm" in name:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {"params": decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
 
 
 def _make_baseline_dataset(
@@ -170,27 +192,37 @@ class _TargetTransform:
         self.name = name
         self.mean = float(targets.mean().item())
         self.std = float(targets.std(unbiased=False).clamp_min(1e-8).item())
-        if name in {"log1p", "sqrt"} and bool((targets < 0).any()):
-            raise ValueError(f"{name} target transform requires nonnegative targets.")
-        if name not in {"none", "standardize", "log1p", "sqrt"}:
+        self.floor_value = 0.0
+        if name in {"log1p", "sqrt", "log10"} and bool((targets < 0).any()):
+            self.floor_value = float(targets.min().item()) - 0.1
+            print(
+                f"Warning: {name} transform with negative targets. "
+                f"Shifting by {abs(self.floor_value):.2f} to make all targets nonnegative."
+            )
+        if name not in {"none", "standardize", "log1p", "sqrt", "log10"}:
             raise ValueError(f"Unsupported target transform: {name}")
 
     def forward(self, targets: torch.Tensor) -> torch.Tensor:
         if self.name == "standardize":
             return (targets - self.mean) / self.std
+        shifted = targets - self.floor_value
         if self.name == "log1p":
-            return torch.log1p(targets)
+            return torch.log1p(shifted.clamp_min(0))
         if self.name == "sqrt":
-            return torch.sqrt(targets.clamp_min(0))
+            return torch.sqrt(shifted.clamp_min(0))
+        if self.name == "log10":
+            return torch.log10(shifted.clamp_min(1e-8))
         return targets
 
     def inverse(self, predictions: torch.Tensor) -> torch.Tensor:
         if self.name == "standardize":
             return predictions * self.std + self.mean
         if self.name == "log1p":
-            return torch.expm1(predictions).clamp_min(0)
+            return torch.expm1(predictions).clamp_min(0) + self.floor_value
         if self.name == "sqrt":
-            return torch.square(predictions).clamp_min(0)
+            return torch.square(predictions).clamp_min(0) + self.floor_value
+        if self.name == "log10":
+            return torch.pow(10.0, predictions).clamp_min(0) + self.floor_value
         return predictions
 
 
@@ -227,14 +259,98 @@ def _fraction_subset(
     return Subset(dataset, indices)
 
 
+def _build_importance_sampler(
+    targets: torch.Tensor,
+    bins: list[tuple[float, float, float]],
+    seed: int = 123,
+) -> WeightedRandomSampler:
+    """Build a WeightedRandomSampler that oversamples rare regions.
+
+    bins: list of (low, high, weight) tuples defining region weights.
+    Samples outside all bins get weight 1.0.
+    """
+    sample_weights = torch.ones(len(targets), dtype=torch.float32)
+    for low, high, weight in bins:
+        mask = (targets >= low) & (targets < high)
+        sample_weights[mask] = weight
+    return WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(targets),
+        replacement=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+
+
+def _parse_importance_bins(spec: str) -> list[tuple[float, float, float]]:
+    """Parse importance bin spec like 'neg:5.0,zero:2.0,high:3.0,vhigh:4.0'."""
+    if not spec:
+        return []
+    named_bins = {
+        "neg": (-1e9, 0.0),
+        "zero": (0.0, 10.0),
+        "low": (10.0, 50.0),
+        "mid": (50.0, 150.0),
+        "high": (150.0, 300.0),
+        "vhigh": (300.0, 1e9),
+    }
+    bins = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, weight_str = part.split(":")
+        low, high = named_bins[name.strip()]
+        bins.append((low, high, float(weight_str)))
+    return bins
+
+
+def _zero_inflated_loss(
+    regression_pred: torch.Tensor,
+    classifier_logit: torch.Tensor,
+    targets: torch.Tensor,
+    regression_loss_name: str,
+    classifier_weight: float = 1.0,
+    regression_weight: float = 1.0,
+) -> torch.Tensor:
+    """Combined loss for zero-inflated regression.
+
+    Binary cross-entropy on classifier (target > 0) + regression loss on ALL targets.
+    The regression head must learn to predict near-zero for zero-bandgap materials
+    even though the classifier will suppress it, because the soft-gated prediction
+    (sigmoid(classifier_logit) * regression_pred) is what the loss sees.
+    """
+    is_nonzero = (targets > 0).float()
+
+    classifier_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        classifier_logit, is_nonzero
+    )
+
+    # Regression loss on ALL targets (not just nonzero) — the soft-gated
+    # prediction is what the loss compares against, so regression must learn
+    # to predict small values for zeros too.
+    if regression_loss_name == "l1":
+        reg_loss = torch.mean(torch.abs(regression_pred - targets))
+    elif regression_loss_name == "smoothl1":
+        reg_loss = torch.mean(
+            torch.nn.functional.smooth_l1_loss(regression_pred, targets, reduction="none")
+        )
+    elif regression_loss_name == "mse":
+        reg_loss = torch.mean((regression_pred - targets) ** 2)
+    else:
+        raise ValueError(f"Unsupported regression loss: {regression_loss_name}")
+
+    return classifier_weight * classifier_loss + regression_weight * reg_loss
+
+
 def _evaluate_alignn(
-    model: ALIGNNModel,
+    model,
     loader: DataLoader,
     device: torch.device,
     target_transform: _TargetTransform | None = None,
     prediction_min: float | None = None,
     use_amp: bool = False,
     return_predictions: bool = False,
+    zero_inflated: bool = False,
 ) -> dict[str, float] | tuple[dict[str, float], list[dict[str, float | str]]]:
     model.eval()
     predictions: list[torch.Tensor] = []
@@ -246,7 +362,10 @@ def _evaluate_alignn(
             line_graph_batch = line_graph_batch.to(device)
             targets = targets.to(device)
             with torch.cuda.amp.autocast(enabled=use_amp):
-                batch_predictions = model(graph_batch, line_graph_batch)
+                if zero_inflated:
+                    batch_predictions = model.predict(graph_batch, line_graph_batch)
+                else:
+                    batch_predictions = model(graph_batch, line_graph_batch)
             if target_transform is not None:
                 batch_predictions = target_transform.inverse(batch_predictions)
             if prediction_min is not None:
@@ -583,6 +702,15 @@ def train_alignn_small_subset(
     device: str | None = None,
     num_workers: int = 4,
     keep_data_order: bool = False,
+    group_decay: bool = False,
+    zero_inflated: bool = False,
+    zero_inflated_classifier_weight: float = 1.0,
+    zero_inflated_regression_weight: float = 1.0,
+    importance_sample: bool = False,
+    importance_sample_bins: str = "",
+    dropout: float = 0.0,
+    early_stopping_patience: int = 0,
+    max_grad_norm: float = 0.0,
 ) -> None:
     project_root = project_root.resolve()
     torch.manual_seed(seed)
@@ -636,9 +764,16 @@ def train_alignn_small_subset(
     train_loader = DataLoader(
         train_subset,
         batch_size=min(batch_size, len(train_subset)),
-        shuffle=not keep_data_order,
+        shuffle=not keep_data_order and not importance_sample,
         generator=torch.Generator().manual_seed(seed),
         collate_fn=collate_graph_samples_with_line_graph,
+        sampler=_build_importance_sampler(
+            _collect_targets(train_subset),
+            _parse_importance_bins(importance_sample_bins),
+            seed,
+        )
+        if importance_sample
+        else None,
         **loader_options,
     )
     val_loader = DataLoader(
@@ -658,15 +793,25 @@ def train_alignn_small_subset(
         **loader_options,
     )
 
-    model = ALIGNNModel(
-        hidden_dim=hidden_dim,
-        alignn_layers=alignn_layers,
-        gcn_layers=gcn_layers,
-        readout=readout,
-        energy_mult_natoms=energy_mult_natoms,
-        penalty_factor=penalty_factor,
-        penalty_threshold=penalty_threshold,
-    ).to(run_device)
+    if zero_inflated:
+        model = ZeroInflatedALIGNNModel(
+            hidden_dim=hidden_dim,
+            alignn_layers=alignn_layers,
+            gcn_layers=gcn_layers,
+            readout=readout,
+            dropout=dropout,
+        ).to(run_device)
+    else:
+        model = ALIGNNModel(
+            hidden_dim=hidden_dim,
+            alignn_layers=alignn_layers,
+            gcn_layers=gcn_layers,
+            readout=readout,
+            energy_mult_natoms=energy_mult_natoms,
+            penalty_factor=penalty_factor,
+            penalty_threshold=penalty_threshold,
+            dropout=dropout,
+        ).to(run_device)
     if torch_compile:
         model = torch.compile(model)
     if pretrained_multitask_checkpoint is not None:
@@ -697,7 +842,11 @@ def train_alignn_small_subset(
             "Loaded multi-task encoder weights: "
             f"{len(encoder_state)} tensors from {pretrained_multitask_checkpoint}."
         )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(
+        _adamw_params(model, group_decay),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
     if loss_name not in {"mse", "smoothl1", "l1"}:
         raise ValueError(f"Unsupported loss: {loss_name}")
     scheduler = None
@@ -719,6 +868,7 @@ def train_alignn_small_subset(
         raise ValueError(f"Unsupported selection metric: {selection_metric}")
     best_val_score = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
+    epochs_without_improvement = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -732,20 +882,32 @@ def train_alignn_small_subset(
             targets = targets.to(run_device)
 
             with torch.cuda.amp.autocast(enabled=use_amp):
-                predictions = model(graph_batch, line_graph_batch)
-                loss_targets = transform.forward(targets)
-                loss = _weighted_regression_loss(
-                predictions=predictions,
-                targets=loss_targets,
-                weight_targets=targets,
-                loss_name=loss_name,
-                positive_weight=positive_weight,
-                high_positive_weight=high_positive_weight,
-                high_target_threshold=high_target_threshold,
-                low_target_weight=low_target_weight,
-                low_target_threshold=low_target_threshold,
-                mse_tail_weight=mse_tail_weight,
-            )
+                if zero_inflated:
+                    regression_pred, classifier_logit = model(graph_batch, line_graph_batch)
+                    loss = _zero_inflated_loss(
+                        regression_pred=regression_pred,
+                        classifier_logit=classifier_logit,
+                        targets=targets,
+                        regression_loss_name=loss_name,
+                        classifier_weight=zero_inflated_classifier_weight,
+                        regression_weight=zero_inflated_regression_weight,
+                    )
+                    predictions = torch.sigmoid(classifier_logit) * regression_pred.clamp_min(0)
+                else:
+                    predictions = model(graph_batch, line_graph_batch)
+                    loss_targets = transform.forward(targets)
+                    loss = _weighted_regression_loss(
+                        predictions=predictions,
+                        targets=loss_targets,
+                        weight_targets=targets,
+                        loss_name=loss_name,
+                        positive_weight=positive_weight,
+                        high_positive_weight=high_positive_weight,
+                        high_target_threshold=high_target_threshold,
+                        low_target_weight=low_target_weight,
+                        low_target_threshold=low_target_threshold,
+                        mse_tail_weight=mse_tail_weight,
+                    )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -754,7 +916,10 @@ def train_alignn_small_subset(
                 scheduler.step()
 
             train_losses.append(float(loss.item()))
-            metric_predictions = transform.inverse(predictions)
+            if zero_inflated:
+                metric_predictions = predictions
+            else:
+                metric_predictions = transform.inverse(predictions)
             if prediction_min is not None:
                 metric_predictions = metric_predictions.clamp_min(prediction_min)
             train_predictions.append(metric_predictions.detach().cpu())
@@ -768,9 +933,10 @@ def train_alignn_small_subset(
             model,
             val_loader,
             run_device,
-            target_transform=transform,
+            target_transform=transform if not zero_inflated else None,
             prediction_min=prediction_min,
             use_amp=use_amp,
+            zero_inflated=zero_inflated,
         )
         mean_loss = sum(train_losses) / max(len(train_losses), 1)
         history.append(
@@ -795,6 +961,9 @@ def train_alignn_small_subset(
                 key: value.detach().cpu().clone()
                 for key, value in model.state_dict().items()
             }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
         print(
             f"epoch={epoch:03d} loss={mean_loss:.6f} "
@@ -803,6 +972,10 @@ def train_alignn_small_subset(
             f"val_high_pos_mae={val_metrics['high_positive_mae']:.6f} "
             f"val_p95={val_metrics['p95_abs_error']:.6f}"
         )
+
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {early_stopping_patience} epochs)")
+            break
 
     checkpoints_dir = project_root / "results" / "checkpoints"
     logs_dir = project_root / "results" / "logs"
@@ -820,10 +993,11 @@ def train_alignn_small_subset(
         model,
         test_loader,
         run_device,
-        target_transform=transform,
+        target_transform=transform if not zero_inflated else None,
         prediction_min=prediction_min,
         use_amp=use_amp,
         return_predictions=True,
+        zero_inflated=zero_inflated,
     )
     torch.save(
         {
@@ -950,6 +1124,41 @@ def train_alignn_small_subset(
     )
 
 
+def _pcgrad_gradients(
+    losses: list[torch.Tensor],
+    target_names: list[str],
+    shared_params: list[torch.nn.Parameter],
+) -> torch.Tensor:
+    """Apply Projected Conflicting Gradients (PCGrad) to resolve gradient conflicts.
+
+    For each pair of tasks with conflicting gradients, project one gradient
+    onto the normal plane of the other to remove the conflicting component.
+    """
+    grads = []
+    for idx, loss in enumerate(losses):
+        retain = idx < len(losses) - 1
+        grad = torch.autograd.grad(
+            loss, shared_params, retain_graph=retain, allow_unused=True
+        )
+        safe_grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(grad, shared_params)]
+        grads.append(torch.cat([g.reshape(-1) for g in safe_grads]))
+
+    num_tasks = len(grads)
+    projected = [g.clone() for g in grads]
+
+    for i in range(num_tasks):
+        for j in range(num_tasks):
+            if i == j:
+                continue
+            dot = torch.dot(projected[i], grads[j])
+            if dot < 0:
+                proj = projected[i] - (dot / (grads[j].dot(grads[j]) + 1e-8)) * grads[j]
+                projected[i] = proj
+
+    combined = torch.stack(projected).mean(dim=0)
+    return combined
+
+
 def train_multitask_alignn(
     project_root: Path,
     targets: list[str],
@@ -978,6 +1187,9 @@ def train_multitask_alignn(
     run_name: str = "multitask_alignn",
     device: str | None = None,
     num_workers: int = 4,
+    target_weights: dict[str, float] | None = None,
+    gradient_surgery: bool = False,
+    uncertainty_weighting: bool = False,
 ) -> None:
     """Train a shared ALIGNN encoder with homogeneous target batches."""
 
@@ -1102,6 +1314,23 @@ def train_multitask_alignn(
     elif scheduler_name != "none":
         raise ValueError(f"Unsupported scheduler: {scheduler_name}")
 
+    if target_weights is None:
+        target_weights = {t: 1.0 for t in target_names}
+    else:
+        for t in target_names:
+            target_weights.setdefault(t, 1.0)
+
+    uncertainty_log_vars: dict[str, torch.nn.Parameter] | None = None
+    if uncertainty_weighting:
+        uncertainty_log_vars = {
+            t: torch.nn.Parameter(torch.zeros(1, device=run_device)) for t in target_names
+        }
+        for p in uncertainty_log_vars.values():
+            p.requires_grad_(True)
+        optimizer.add_param_group(
+            {"params": list(uncertainty_log_vars.values())}
+        )
+
     history: list[dict[str, float | int | str]] = []
     best_val_score = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
@@ -1114,6 +1343,14 @@ def train_multitask_alignn(
         train_targets: dict[str, list[torch.Tensor]] = {target: [] for target in target_names}
 
         for _ in range(max_steps_per_epoch):
+            optimizer.zero_grad(set_to_none=True)
+
+            per_target_losses: list[torch.Tensor] = []
+            per_target_raw_losses: list[float] = []
+            per_target_predictions: list[torch.Tensor] = []
+            per_target_targets: list[torch.Tensor] = []
+            per_target_names: list[str] = []
+
             for target_name in target_names:
                 try:
                     graph_batch, line_graph_batch, targets_batch, _, _, _ = next(
@@ -1131,23 +1368,58 @@ def train_multitask_alignn(
                 predictions = model(graph_batch, line_graph_batch, target_name)
                 loss_targets = transforms[target_name].forward(targets_batch)
                 if loss_name == "mse":
-                    loss = torch.nn.functional.mse_loss(predictions, loss_targets)
+                    raw_loss = torch.nn.functional.mse_loss(predictions, loss_targets)
                 elif loss_name == "smoothl1":
-                    loss = torch.nn.functional.smooth_l1_loss(predictions, loss_targets)
+                    raw_loss = torch.nn.functional.smooth_l1_loss(predictions, loss_targets)
                 else:
-                    loss = torch.nn.functional.l1_loss(predictions, loss_targets)
+                    raw_loss = torch.nn.functional.l1_loss(predictions, loss_targets)
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
-                if scheduler is not None:
-                    scheduler.step()
+                if uncertainty_weighting and uncertainty_log_vars is not None:
+                    log_var = uncertainty_log_vars[target_name]
+                    weighted_loss = torch.exp(-log_var) * raw_loss + log_var
+                else:
+                    weighted_loss = raw_loss * target_weights[target_name]
 
-                train_loss_by_target[target_name].append(float(loss.item()))
-                train_predictions[target_name].append(
+                per_target_losses.append(weighted_loss)
+                per_target_raw_losses.append(float(raw_loss.item()))
+                per_target_predictions.append(
                     transforms[target_name].inverse(predictions).detach().cpu()
                 )
-                train_targets[target_name].append(targets_batch.detach().cpu())
+                per_target_targets.append(targets_batch.detach().cpu())
+                per_target_names.append(target_name)
+
+            if gradient_surgery and len(per_target_losses) > 1:
+                shared_params = [p for p in model.encoder.parameters() if p.requires_grad]
+                combined_grad = _pcgrad_gradients(
+                    per_target_losses, per_target_names, shared_params
+                )
+                total_loss = sum(per_target_losses)
+                total_loss.backward()
+                for i, param in enumerate(shared_params):
+                    if param.grad is not None:
+                        offset = 0
+                        for g in torch.autograd.grad(
+                            per_target_losses[0],
+                            shared_params,
+                            retain_graph=True,
+                        ):
+                            numel = g.numel()
+                            param.grad.view(-1)[offset : offset + numel] = combined_grad[
+                                offset : offset + numel
+                            ]
+                            offset += numel
+            else:
+                total_loss = sum(per_target_losses)
+                total_loss.backward()
+
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            for i, target_name in enumerate(per_target_names):
+                train_loss_by_target[target_name].append(per_target_raw_losses[i])
+                train_predictions[target_name].append(per_target_predictions[i])
+                train_targets[target_name].append(per_target_targets[i])
 
         val_metrics_by_target: dict[str, dict[str, float]] = {}
         val_scores: list[float] = []
