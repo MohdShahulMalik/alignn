@@ -142,11 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
     alignn_train.add_argument("--seed", type=int, default=123)
     alignn_train.add_argument("--learning-rate", type=float, default=1e-3)
     alignn_train.add_argument("--weight-decay", type=float, default=1e-5)
+    alignn_train.add_argument(
+        "--group-decay",
+        action="store_true",
+        help="Exclude bias, batchnorm, and norm parameters from weight decay like original ALIGNN.",
+    )
     alignn_train.add_argument("--loss", choices=["l1", "mse", "smoothl1"], default="l1")
     alignn_train.add_argument("--scheduler", choices=["onecycle", "none"], default="onecycle")
     alignn_train.add_argument(
         "--target-transform",
-        choices=["none", "standardize", "log1p", "sqrt"],
+        choices=["none", "standardize", "log1p", "sqrt", "log10"],
         default="none",
         help="Transform targets during training while reporting metrics on the original scale.",
     )
@@ -217,6 +222,51 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional multi-task checkpoint used to initialize the ALIGNN encoder.",
     )
+    alignn_train.add_argument(
+        "--zero-inflated",
+        action="store_true",
+        help="Use zero-inflated regression: classifier head for P(target > 0) + regression head for nonzero targets.",
+    )
+    alignn_train.add_argument(
+        "--zero-inflated-classifier-weight",
+        type=float,
+        default=1.0,
+        help="Weight for the binary classifier loss in zero-inflated mode.",
+    )
+    alignn_train.add_argument(
+        "--zero-inflated-regression-weight",
+        type=float,
+        default=1.0,
+        help="Weight for the regression loss in zero-inflated mode.",
+    )
+    alignn_train.add_argument(
+        "--importance-sample",
+        action="store_true",
+        help="Use importance sampling to oversample rare target regions during training.",
+    )
+    alignn_train.add_argument(
+        "--importance-sample-bins",
+        default="",
+        help="Importance sampling bin spec, e.g. 'neg:5.0,zero:2.0,high:3.0,vhigh:4.0'.",
+    )
+    alignn_train.add_argument(
+        "--dropout",
+        type=float,
+        default=0.0,
+        help="Dropout probability applied after each EdgeGatedGraphConv block (0 = no dropout).",
+    )
+    alignn_train.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Stop training if val score hasn't improved for N epochs (0 = no early stopping).",
+    )
+    alignn_train.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=0.0,
+        help="Clip gradients to this max norm (0 = no clipping).",
+    )
     alignn_train.add_argument("--device", default=None)
     alignn_train.add_argument("--project-root", type=Path, default=Path.cwd())
 
@@ -271,6 +321,27 @@ def build_parser() -> argparse.ArgumentParser:
     multitask_train.add_argument("--run-name", default="multitask_alignn")
     multitask_train.add_argument("--device", default=None)
     multitask_train.add_argument("--project-root", type=Path, default=Path.cwd())
+    multitask_train.add_argument(
+        "--target-weights",
+        default=None,
+        help=(
+            "Per-target loss weights as comma-separated name:weight pairs, "
+            "e.g. 'bulk_modulus_kv:2.0,formation_energy_peratom:1.5'. "
+            "Missing targets default to weight 1.0."
+        ),
+    )
+    multitask_train.add_argument(
+        "--gradient-surgery",
+        action="store_true",
+        default=False,
+        help="Enable PCGrad gradient surgery to resolve conflicting task gradients.",
+    )
+    multitask_train.add_argument(
+        "--uncertainty-weighting",
+        action="store_true",
+        default=False,
+        help="Enable learned uncertainty-based task weighting (Kendall et al.).",
+    )
 
     multitask_overfit = subparsers.add_parser(
         "alignn-overfit-multitask",
@@ -426,11 +497,27 @@ def main() -> None:
             torch_compile=args.torch_compile,
             pretrained_multitask_checkpoint=args.pretrained_multitask_checkpoint,
             keep_data_order=args.keep_data_order,
+            group_decay=args.group_decay,
+            zero_inflated=args.zero_inflated,
+            zero_inflated_classifier_weight=args.zero_inflated_classifier_weight,
+            zero_inflated_regression_weight=args.zero_inflated_regression_weight,
+            importance_sample=args.importance_sample,
+            importance_sample_bins=args.importance_sample_bins,
             run_name=args.run_name,
             device=args.device,
+            dropout=args.dropout,
+            early_stopping_patience=args.early_stopping_patience,
+            max_grad_norm=args.max_grad_norm,
         )
     elif args.command == "alignn-train-multitask":
         from alignn.train.trainer import train_multitask_alignn
+
+        target_weights = None
+        if args.target_weights:
+            target_weights = {}
+            for pair in args.target_weights.split(","):
+                name, weight = pair.split(":")
+                target_weights[name.strip()] = float(weight.strip())
 
         train_multitask_alignn(
             project_root=args.project_root,
@@ -459,6 +546,10 @@ def main() -> None:
             readout=args.readout,
             run_name=args.run_name,
             device=args.device,
+            num_workers=args.num_workers,
+            target_weights=target_weights,
+            gradient_surgery=args.gradient_surgery,
+            uncertainty_weighting=args.uncertainty_weighting,
         )
     elif args.command == "alignn-overfit-multitask":
         from alignn.train.trainer import overfit_multitask_tiny_subset
