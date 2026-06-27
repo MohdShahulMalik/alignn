@@ -342,6 +342,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Enable learned uncertainty-based task weighting (Kendall et al.).",
     )
+    multitask_train.add_argument(
+        "--dual-balancing",
+        action="store_true",
+        default=False,
+        help="Enable Dual-Balancing MTL (DB-MTL): log-loss + max-norm gradient normalization (Lin et al., 2026).",
+    )
+    multitask_train.add_argument(
+        "--gradnorm",
+        action="store_true",
+        default=False,
+        help="Enable GradNorm dynamic gradient balancing (Chen et al., ICML 2018).",
+    )
+    multitask_train.add_argument(
+        "--gradnorm-alpha",
+        type=float,
+        default=1.5,
+        help="GradNorm asymmetry hyperparameter alpha.",
+    )
 
     multitask_overfit = subparsers.add_parser(
         "alignn-overfit-multitask",
@@ -550,6 +568,9 @@ def main() -> None:
             target_weights=target_weights,
             gradient_surgery=args.gradient_surgery,
             uncertainty_weighting=args.uncertainty_weighting,
+            dual_balancing=args.dual_balancing,
+            gradnorm=args.gradnorm,
+            gradnorm_alpha=args.gradnorm_alpha,
         )
     elif args.command == "alignn-overfit-multitask":
         from alignn.train.trainer import overfit_multitask_tiny_subset
