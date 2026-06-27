@@ -1136,9 +1136,8 @@ def _pcgrad_gradients(
     """
     grads = []
     for idx, loss in enumerate(losses):
-        retain = idx < len(losses) - 1
         grad = torch.autograd.grad(
-            loss, shared_params, retain_graph=retain, allow_unused=True
+            loss, shared_params, retain_graph=True, allow_unused=True
         )
         safe_grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(grad, shared_params)]
         grads.append(torch.cat([g.reshape(-1) for g in safe_grads]))
@@ -1157,6 +1156,73 @@ def _pcgrad_gradients(
 
     combined = torch.stack(projected).mean(dim=0)
     return combined
+
+
+def _dbmtl_combine(
+    losses: list[torch.Tensor],
+    shared_params: list[torch.nn.Parameter],
+    epsilon: float = 1e-8,
+) -> torch.Tensor:
+    """Dual-Balancing MTL (Lin et al., Neural Networks 2026).
+
+    1. Log-transform each loss for loss-scale balancing.
+    2. Normalize all task gradients to the max gradient norm.
+    """
+    log_losses = [torch.log(l + epsilon) for l in losses]
+
+    grads = []
+    for log_l in log_losses:
+        grad = torch.autograd.grad(log_l, shared_params, retain_graph=True, allow_unused=True)
+        safe_grads = [g if g is not None else torch.zeros_like(p) for g, p in zip(grad, shared_params)]
+        grads.append(torch.cat([g.reshape(-1) for g in safe_grads]))
+
+    norms = [g.norm() for g in grads]
+    max_norm = max(norms)
+
+    normalized = []
+    for g, n in zip(grads, norms):
+        if n > 1e-12:
+            normalized.append(g * (max_norm / n))
+        else:
+            normalized.append(g)
+
+    combined = torch.stack(normalized).mean(dim=0)
+    return combined
+
+
+def _gradnorm_update(
+    losses: list[torch.Tensor],
+    target_names: list[str],
+    target_weights: list[torch.nn.Parameter],
+    shared_params: list[torch.nn.Parameter],
+    initial_losses: list[float],
+    alpha: float = 1.5,
+    lr: float = 1e-4,
+) -> None:
+    """GradNorm-inspired weight update (simplified, no second-order gradients).
+
+    Adjusts task weights based on inverse training rates: tasks that learn
+    slower get higher weight. This avoids the fragile create_graph=True approach.
+    """
+    current_losses = [l.item() for l in losses]
+
+    inv_rates = []
+    for i in range(len(losses)):
+        if initial_losses[i] > 1e-12:
+            inv_rates.append(current_losses[i] / initial_losses[i])
+        else:
+            inv_rates.append(1.0)
+    avg_inv_rate = sum(inv_rates) / len(inv_rates)
+
+    with torch.no_grad():
+        for i, w in enumerate(target_weights):
+            ratio = inv_rates[i] / avg_inv_rate
+            target_weight = ratio ** alpha
+            w.data += lr * (target_weight - w.data)
+
+        weight_sum = sum(w.item() for w in target_weights)
+        for w in target_weights:
+            w.data *= len(target_weights) / weight_sum
 
 
 def train_multitask_alignn(
@@ -1190,6 +1256,9 @@ def train_multitask_alignn(
     target_weights: dict[str, float] | None = None,
     gradient_surgery: bool = False,
     uncertainty_weighting: bool = False,
+    dual_balancing: bool = False,
+    gradnorm: bool = False,
+    gradnorm_alpha: float = 1.5,
 ) -> None:
     """Train a shared ALIGNN encoder with homogeneous target batches."""
 
@@ -1301,6 +1370,18 @@ def train_multitask_alignn(
         head_hidden_dim=head_hidden_dim,
     ).to(run_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    uncertainty_log_vars: dict[str, torch.nn.Parameter] | None = None
+    if uncertainty_weighting:
+        uncertainty_log_vars = {
+            t: torch.nn.Parameter(torch.zeros(1, device=run_device)) for t in target_names
+        }
+        for p in uncertainty_log_vars.values():
+            p.requires_grad_(True)
+        optimizer.add_param_group(
+            {"params": list(uncertainty_log_vars.values())}
+        )
+
     max_steps_per_epoch = max(len(loader) for loader in train_loaders.values())
     scheduler = None
     if scheduler_name == "onecycle":
@@ -1320,16 +1401,13 @@ def train_multitask_alignn(
         for t in target_names:
             target_weights.setdefault(t, 1.0)
 
-    uncertainty_log_vars: dict[str, torch.nn.Parameter] | None = None
-    if uncertainty_weighting:
-        uncertainty_log_vars = {
-            t: torch.nn.Parameter(torch.zeros(1, device=run_device)) for t in target_names
-        }
-        for p in uncertainty_log_vars.values():
-            p.requires_grad_(True)
-        optimizer.add_param_group(
-            {"params": list(uncertainty_log_vars.values())}
-        )
+    gradnorm_weight_params: list[torch.nn.Parameter] | None = None
+    initial_losses: list[float] | None = None
+    if gradnorm:
+        gradnorm_weight_params = [
+            torch.nn.Parameter(torch.tensor(target_weights[t], device=run_device))
+            for t in target_names
+        ]
 
     history: list[dict[str, float | int | str]] = []
     best_val_score = float("inf")
@@ -1377,6 +1455,9 @@ def train_multitask_alignn(
                 if uncertainty_weighting and uncertainty_log_vars is not None:
                     log_var = uncertainty_log_vars[target_name]
                     weighted_loss = torch.exp(-log_var) * raw_loss + log_var
+                elif gradnorm and gradnorm_weight_params is not None:
+                    idx = per_target_names.__len__()
+                    weighted_loss = gradnorm_weight_params[idx] * raw_loss
                 else:
                     weighted_loss = raw_loss * target_weights[target_name]
 
@@ -1388,29 +1469,50 @@ def train_multitask_alignn(
                 per_target_targets.append(targets_batch.detach().cpu())
                 per_target_names.append(target_name)
 
-            if gradient_surgery and len(per_target_losses) > 1:
+            total_loss = sum(per_target_losses)
+
+            has_grad_surgery = gradient_surgery or dual_balancing
+
+            if has_grad_surgery and len(per_target_losses) > 1:
                 shared_params = [p for p in model.encoder.parameters() if p.requires_grad]
-                combined_grad = _pcgrad_gradients(
-                    per_target_losses, per_target_names, shared_params
-                )
-                total_loss = sum(per_target_losses)
+                if gradient_surgery and dual_balancing:
+                    pcgrad_grad = _pcgrad_gradients(
+                        per_target_losses, per_target_names, shared_params
+                    )
+                    combined_grad = _dbmtl_combine(
+                        per_target_losses, shared_params
+                    )
+                    combined_grad = 0.5 * pcgrad_grad + 0.5 * combined_grad
+                    del pcgrad_grad
+                elif dual_balancing:
+                    combined_grad = _dbmtl_combine(
+                        per_target_losses, shared_params
+                    )
+                else:
+                    combined_grad = _pcgrad_gradients(
+                        per_target_losses, per_target_names, shared_params
+                    )
                 total_loss.backward()
-                for i, param in enumerate(shared_params):
-                    if param.grad is not None:
-                        offset = 0
-                        for g in torch.autograd.grad(
-                            per_target_losses[0],
-                            shared_params,
-                            retain_graph=True,
-                        ):
-                            numel = g.numel()
-                            param.grad.view(-1)[offset : offset + numel] = combined_grad[
-                                offset : offset + numel
-                            ]
-                            offset += numel
+                combined_offset = 0
+                for param in shared_params:
+                    numel = param.numel()
+                    param.grad = combined_grad[combined_offset : combined_offset + numel].view(param.shape).clone()
+                    combined_offset += numel
+                del combined_grad
+            elif gradnorm and gradnorm_weight_params is not None:
+                total_loss.backward()
             else:
-                total_loss = sum(per_target_losses)
                 total_loss.backward()
+
+            if gradnorm and gradnorm_weight_params is not None:
+                if initial_losses is None:
+                    initial_losses = [l.item() for l in per_target_losses]
+                shared_params_enc = [p for p in model.encoder.parameters() if p.requires_grad]
+                _gradnorm_update(
+                    per_target_losses, per_target_names,
+                    gradnorm_weight_params, shared_params_enc,
+                    initial_losses, alpha=gradnorm_alpha,
+                )
 
             optimizer.step()
             if scheduler is not None:
