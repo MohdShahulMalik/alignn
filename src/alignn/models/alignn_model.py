@@ -210,6 +210,8 @@ class MultiTaskALIGNNModel(nn.Module):
         angle_rbf_bins: int = 40,
         readout: str = "mean",
         head_hidden_dim: int | None = None,
+        head_configs: dict[str, dict] | None = None,
+        head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if not target_names:
@@ -225,17 +227,27 @@ class MultiTaskALIGNNModel(nn.Module):
             angle_rbf_bins=angle_rbf_bins,
             readout=readout,
         )
-        head_dim = head_hidden_dim or hidden_dim
-        self.heads = nn.ModuleDict(
-            {
-                target: nn.Sequential(
-                    nn.Linear(self.encoder.output_dim, head_dim),
-                    nn.SiLU(),
-                    nn.Linear(head_dim, 1),
-                )
-                for target in self.target_names
-            }
+        default_head_dim = head_hidden_dim or hidden_dim
+        self.head_norms = nn.ModuleDict(
+            {target: nn.LayerNorm(self.encoder.output_dim) for target in self.target_names}
         )
+        self.heads = nn.ModuleDict()
+        for target in self.target_names:
+            cfg = (head_configs or {}).get(target, {})
+            h_dim = cfg.get("hidden_dim", default_head_dim)
+            n_layers = cfg.get("n_layers", 2)
+            dropout = cfg.get("dropout", head_dropout)
+            layers: list[nn.Module] = []
+            in_dim = self.encoder.output_dim
+            for _ in range(n_layers - 1):
+                layers.extend([
+                    nn.Linear(in_dim, h_dim),
+                    nn.SiLU(),
+                    nn.Dropout(dropout),
+                ])
+                in_dim = h_dim
+            layers.append(nn.Linear(in_dim, 1))
+            self.heads[target] = nn.Sequential(*layers)
 
     def forward(
         self,
@@ -246,4 +258,5 @@ class MultiTaskALIGNNModel(nn.Module):
         if target_name not in self.heads:
             raise KeyError(f"Unknown multi-task target: {target_name}")
         graph_feats = self.encoder(g, lg)
+        graph_feats = self.head_norms[target_name](graph_feats)
         return self.heads[target_name](graph_feats).squeeze(-1)
