@@ -1128,11 +1128,15 @@ def _pcgrad_gradients(
     losses: list[torch.Tensor],
     target_names: list[str],
     shared_params: list[torch.nn.Parameter],
+    selective_targets: set[str] | None = None,
 ) -> torch.Tensor:
     """Apply Projected Conflicting Gradients (PCGrad) to resolve gradient conflicts.
 
     For each pair of tasks with conflicting gradients, project one gradient
     onto the normal plane of the other to remove the conflicting component.
+
+    If selective_targets is set, only project gradients FROM those targets
+    (i.e., only the specified targets' gradients get modified).
     """
     grads = []
     for idx, loss in enumerate(losses):
@@ -1146,6 +1150,8 @@ def _pcgrad_gradients(
     projected = [g.clone() for g in grads]
 
     for i in range(num_tasks):
+        if selective_targets is not None and target_names[i] not in selective_targets:
+            continue
         for j in range(num_tasks):
             if i == j:
                 continue
@@ -1161,12 +1167,14 @@ def _pcgrad_gradients(
 def _dbmtl_combine(
     losses: list[torch.Tensor],
     shared_params: list[torch.nn.Parameter],
+    target_weights: list[float] | None = None,
     epsilon: float = 1e-8,
 ) -> torch.Tensor:
     """Dual-Balancing MTL (Lin et al., Neural Networks 2026).
 
     1. Log-transform each loss for loss-scale balancing.
     2. Normalize all task gradients to the max gradient norm.
+    3. Apply target weights AFTER normalization (so weights actually take effect).
     """
     log_losses = [torch.log(l + epsilon) for l in losses]
 
@@ -1186,7 +1194,12 @@ def _dbmtl_combine(
         else:
             normalized.append(g)
 
-    combined = torch.stack(normalized).mean(dim=0)
+    if target_weights is not None:
+        weighted = [g * w for g, w in zip(normalized, target_weights)]
+    else:
+        weighted = normalized
+
+    combined = torch.stack(weighted).mean(dim=0)
     return combined
 
 
@@ -1259,6 +1272,11 @@ def train_multitask_alignn(
     dual_balancing: bool = False,
     gradnorm: bool = False,
     gradnorm_alpha: float = 1.5,
+    head_configs: dict[str, dict] | None = None,
+    head_dropout: float = 0.0,
+    selective_pcgrad_targets: set[str] | None = None,
+    group_decay: bool = False,
+    early_stopping_patience: int = 0,
 ) -> None:
     """Train a shared ALIGNN encoder with homogeneous target batches."""
 
@@ -1368,8 +1386,10 @@ def train_multitask_alignn(
         gcn_layers=gcn_layers,
         readout=readout,
         head_hidden_dim=head_hidden_dim,
+        head_configs=head_configs,
+        head_dropout=head_dropout,
     ).to(run_device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(_adamw_params(model, group_decay), lr=learning_rate, weight_decay=weight_decay)
 
     uncertainty_log_vars: dict[str, torch.nn.Parameter] | None = None
     if uncertainty_weighting:
@@ -1412,6 +1432,7 @@ def train_multitask_alignn(
     history: list[dict[str, float | int | str]] = []
     best_val_score = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
+    epochs_without_improvement = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -1424,6 +1445,7 @@ def train_multitask_alignn(
             optimizer.zero_grad(set_to_none=True)
 
             per_target_losses: list[torch.Tensor] = []
+            per_target_raw_loss_tensors: list[torch.Tensor] = []
             per_target_raw_losses: list[float] = []
             per_target_predictions: list[torch.Tensor] = []
             per_target_targets: list[torch.Tensor] = []
@@ -1462,6 +1484,7 @@ def train_multitask_alignn(
                     weighted_loss = raw_loss * target_weights[target_name]
 
                 per_target_losses.append(weighted_loss)
+                per_target_raw_loss_tensors.append(raw_loss)
                 per_target_raw_losses.append(float(raw_loss.item()))
                 per_target_predictions.append(
                     transforms[target_name].inverse(predictions).detach().cpu()
@@ -1475,22 +1498,27 @@ def train_multitask_alignn(
 
             if has_grad_surgery and len(per_target_losses) > 1:
                 shared_params = [p for p in model.encoder.parameters() if p.requires_grad]
+                dbmtl_weights = [target_weights[n] for n in per_target_names]
                 if gradient_surgery and dual_balancing:
                     pcgrad_grad = _pcgrad_gradients(
-                        per_target_losses, per_target_names, shared_params
+                        per_target_losses, per_target_names, shared_params,
+                        selective_targets=selective_pcgrad_targets,
                     )
                     combined_grad = _dbmtl_combine(
-                        per_target_losses, shared_params
+                        per_target_raw_loss_tensors, shared_params,
+                        target_weights=dbmtl_weights,
                     )
                     combined_grad = 0.5 * pcgrad_grad + 0.5 * combined_grad
                     del pcgrad_grad
                 elif dual_balancing:
                     combined_grad = _dbmtl_combine(
-                        per_target_losses, shared_params
+                        per_target_raw_loss_tensors, shared_params,
+                        target_weights=dbmtl_weights,
                     )
                 else:
                     combined_grad = _pcgrad_gradients(
-                        per_target_losses, per_target_names, shared_params
+                        per_target_losses, per_target_names, shared_params,
+                        selective_targets=selective_pcgrad_targets,
                     )
                 total_loss.backward()
                 combined_offset = 0
@@ -1561,6 +1589,9 @@ def train_multitask_alignn(
                 key: value.detach().cpu().clone()
                 for key, value in model.state_dict().items()
             }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
         val_summary = " ".join(
             f"{target}:val_mae={val_metrics_by_target[target]['mae']:.6f}"
@@ -1570,6 +1601,10 @@ def train_multitask_alignn(
             f"epoch={epoch:03d} avg_val_standardized_mae={val_score:.6f} "
             f"{val_summary}"
         )
+
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {early_stopping_patience} epochs)")
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -1619,6 +1654,8 @@ def train_multitask_alignn(
             "best_val_standardized_mae": best_val_score,
             "hidden_dim": hidden_dim,
             "head_hidden_dim": head_hidden_dim,
+            "head_configs": head_configs,
+            "head_dropout": head_dropout,
             "alignn_layers": alignn_layers,
             "gcn_layers": gcn_layers,
             "loss": loss_name,
