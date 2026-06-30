@@ -360,6 +360,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.5,
         help="GradNorm asymmetry hyperparameter alpha.",
     )
+    multitask_train.add_argument(
+        "--head-configs",
+        default=None,
+        help=(
+            "Per-task head architecture as JSON, e.g. "
+            "'{\"bulk_modulus_kv\": {\"hidden_dim\": 128, \"n_layers\": 3, \"dropout\": 0.1}}'. "
+            "Missing targets use default 2-layer MLP with head-hidden-dim."
+        ),
+    )
+    multitask_train.add_argument(
+        "--head-dropout",
+        type=float,
+        default=0.0,
+        help="Dropout rate applied to all task heads (can be overridden per-task via --head-configs).",
+    )
+    multitask_train.add_argument(
+        "--selective-pcgrad-targets",
+        default=None,
+        help=(
+            "Comma-separated list of target names for selective PCGrad. "
+            "Only gradients FROM these targets are projected. "
+            "e.g. 'bulk_modulus_kv' to only resolve conflicts from bulk_kv."
+        ),
+    )
+    multitask_train.add_argument(
+        "--group-decay",
+        action="store_true",
+        default=False,
+        help="Exclude bias/norm params from weight decay (matches single-task best config).",
+    )
+    multitask_train.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Stop training if validation score doesn't improve for N epochs (0=disabled).",
+    )
 
     multitask_overfit = subparsers.add_parser(
         "alignn-overfit-multitask",
@@ -529,6 +565,7 @@ def main() -> None:
         )
     elif args.command == "alignn-train-multitask":
         from alignn.train.trainer import train_multitask_alignn
+        import json
 
         target_weights = None
         if args.target_weights:
@@ -536,6 +573,16 @@ def main() -> None:
             for pair in args.target_weights.split(","):
                 name, weight = pair.split(":")
                 target_weights[name.strip()] = float(weight.strip())
+
+        head_configs = None
+        if args.head_configs:
+            head_configs = json.loads(args.head_configs)
+
+        selective_pcgrad_targets = None
+        if args.selective_pcgrad_targets:
+            selective_pcgrad_targets = {
+                t.strip() for t in args.selective_pcgrad_targets.split(",") if t.strip()
+            }
 
         train_multitask_alignn(
             project_root=args.project_root,
@@ -571,6 +618,11 @@ def main() -> None:
             dual_balancing=args.dual_balancing,
             gradnorm=args.gradnorm,
             gradnorm_alpha=args.gradnorm_alpha,
+            head_configs=head_configs,
+            head_dropout=args.head_dropout,
+            selective_pcgrad_targets=selective_pcgrad_targets,
+            group_decay=args.group_decay,
+            early_stopping_patience=args.early_stopping_patience,
         )
     elif args.command == "alignn-overfit-multitask":
         from alignn.train.trainer import overfit_multitask_tiny_subset
